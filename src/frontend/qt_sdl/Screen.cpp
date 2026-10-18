@@ -1127,10 +1127,16 @@ bool ScreenPanelGL::applyPendingShader()
 
     shaderChain.Unload();
     if (preset.empty())
+    {
+        printf("Screen shader: none\n");
         return true;
+    }
 
     if (shaderChain.Load(preset))
+    {
+        printf("Screen shader: loaded '%s'\n", preset.c_str());
         return true;
+    }
 
     std::string msg = "Shader failed: " + shaderChain.GetError() + ", using default";
     osdAddMessage(0xFFA0A0, msg.c_str());
