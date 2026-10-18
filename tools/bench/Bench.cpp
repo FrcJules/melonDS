@@ -66,6 +66,7 @@ struct Options
     u32 Warmup = 0;
     bool JIT = true;
     bool FastMem = true;
+    bool Threaded3D = false;
     bool AudioHash = false;
     std::string StatePath;
     std::string InputPath;
@@ -89,6 +90,7 @@ static void Usage()
         "  --frames N            number of frames to run (default 600)\n"
         "  --warmup N            frames run before the timed ones (default 0, included in --frames)\n"
         "  --no-jit              use the interpreter instead of the JIT\n"
+        "  --threaded-3d         render the 3D on a second thread (software renderer option)\n"
         "  --no-fastmem          JIT without the fast memory mapping (needed under valgrind and qemu)\n"
         "  --state FILE          load a savestate before running\n"
         "  --save-state N:FILE   write a savestate after N frames (repeatable)\n"
@@ -125,6 +127,7 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         else if (arg == "--warmup" && hasValue)     opt.Warmup = (u32)strtoul(argv[++i], nullptr, 10);
         else if (arg == "--no-jit")                 opt.JIT = false;
         else if (arg == "--no-fastmem")             opt.FastMem = false;
+        else if (arg == "--threaded-3d")            opt.Threaded3D = true;
         else if (arg == "--state" && hasValue)      opt.StatePath = argv[++i];
         else if (arg == "--input" && hasValue)      opt.InputPath = argv[++i];
         else if (arg == "--json" && hasValue)       opt.JsonPath = argv[++i];
@@ -360,6 +363,14 @@ int main(int argc, char** argv)
 
     nds->SetNDSCart(std::move(cart));
     nds->Reset();
+
+    if (opt.Threaded3D)
+    {
+        RendererSettings settings {};
+        settings.ScaleFactor = 1;
+        settings.Threaded = true;
+        nds->GetRenderer().SetRenderSettings(settings);
+    }
 
     // FreeBIOS and generated firmware cannot boot a firmware menu
     nds->SetupDirectBoot(opt.RomPath);

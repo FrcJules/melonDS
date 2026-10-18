@@ -20,6 +20,7 @@ means after N calls to `RunFrame`.
 | `--frames N` | number of frames to run (default 600) |
 | `--warmup N` | the first N frames are run but not timed |
 | `--no-jit` | interpreter instead of the JIT |
+| `--threaded-3d` | software 3D renderer on a second thread (measured +18 % on a heavy Pokémon 3D scene) |
 | `--no-fastmem` | JIT without the fast memory mapping (required under valgrind and qemu-user) |
 | `--state FILE` | load a savestate before running |
 | `--save-state N:FILE` | write a savestate after N frames |
