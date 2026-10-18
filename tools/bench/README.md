@@ -6,6 +6,9 @@ It links the emulation core and does not touch it.
     cmake -B build -DBUILD_BENCH=ON
     cmake --build build --target melonDS-bench
 
+To build only the tool, without the Qt frontend: `-DBUILD_QT_SDL=OFF -DENABLE_OGLRENDERER=OFF`
+(the OpenGL renderer needs the frontend's glad headers).
+
     melonDS-bench game.nds --frames 600 --warmup 60 --audio-hash --shot 300:frame300.ppm
 
 The console boots directly (FreeBIOS and generated firmware, no dumps needed), with a fixed RTC
@@ -22,6 +25,7 @@ means after N calls to `RunFrame`.
 | `--shot N:FILE` | write both screens (256x384, top then bottom) as PPM after N frames |
 | `--input FILE` | input script, see below |
 | `--audio-hash` | report sample count, peak and an xxh64 of the whole audio stream |
+| `--frame-times FILE` | write the time of every frame as `frame,ms` CSV (to find stutter) |
 | `--json FILE` | write the JSON report to FILE instead of stdout |
 
 The report contains the frame rate, the mean, median, 95th percentile and maximum time per frame,

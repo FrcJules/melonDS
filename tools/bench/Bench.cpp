@@ -69,6 +69,7 @@ struct Options
     std::string StatePath;
     std::string InputPath;
     std::string JsonPath;
+    std::string FrameTimesPath;
     std::vector<FrameAction> Shots;
     std::vector<FrameAction> SaveStates;
 };
@@ -90,6 +91,7 @@ static void Usage()
         "  --shot N:FILE         write both screens as a PPM after N frames (repeatable)\n"
         "  --input FILE          input script (see README.md)\n"
         "  --audio-hash          include the audio hash in the report\n"
+        "  --frame-times FILE    write the time of every frame (frame,ms) as CSV\n"
         "  --json FILE           write the report to FILE instead of stdout\n");
 }
 
@@ -119,6 +121,7 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         else if (arg == "--state" && hasValue)      opt.StatePath = argv[++i];
         else if (arg == "--input" && hasValue)      opt.InputPath = argv[++i];
         else if (arg == "--json" && hasValue)       opt.JsonPath = argv[++i];
+        else if (arg == "--frame-times" && hasValue) opt.FrameTimesPath = argv[++i];
         else if (arg == "--audio-hash")             opt.AudioHash = true;
         else if (arg == "--shot" && hasValue)
         {
@@ -372,6 +375,7 @@ int main(int argc, char** argv)
 
     std::vector<double> frameMs;
     frameMs.reserve(opt.Frames);
+    std::string frameTimes = "frame,ms\n";
 
     struct ShotResult { u32 Frame; std::string File; u64 Hash; };
     std::vector<ShotResult> shotResults;
@@ -401,9 +405,16 @@ int main(int argc, char** argv)
         nds->RunFrame();
         auto t1 = Clock::now();
 
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        if (!opt.FrameTimesPath.empty())
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%u,%.4f\n", frame, ms);
+            frameTimes += buf;
+        }
+
         if (frame >= opt.Warmup)
         {
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             frameMs.push_back(ms);
             timedSeconds += ms / 1000.0;
         }
@@ -456,6 +467,12 @@ int main(int argc, char** argv)
             fprintf(stderr, "the console stopped after %u frames\n", done);
             break;
         }
+    }
+
+    if (!opt.FrameTimesPath.empty() && !WriteFile(opt.FrameTimesPath, frameTimes.data(), (u32)frameTimes.size()))
+    {
+        fprintf(stderr, "cannot write %s\n", opt.FrameTimesPath.c_str());
+        return 1;
     }
 
     u64 audioHash = XXH64_digest(audioState);
