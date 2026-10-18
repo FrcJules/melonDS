@@ -27,6 +27,8 @@ means after N calls to `RunFrame`.
 | `--input FILE` | input script, see below |
 | `--audio-hash` | report sample count, peak and an xxh64 of the whole audio stream |
 | `--frame-times FILE` | write the time of every frame as `frame,ms` CSV (to find stutter) |
+| `--frame-hashes FILE` | write `frame,screens,audio-so-far` hashes for every frame (find the first diverging frame between two builds) |
+| `--audio-dump FILE` | write the raw audio (stereo s16 LE) to compare waveforms |
 | `--json FILE` | write the JSON report to FILE instead of stdout |
 
 The report contains the frame rate, the mean, median, 95th percentile and maximum time per frame,

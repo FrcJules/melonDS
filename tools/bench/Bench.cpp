@@ -71,6 +71,8 @@ struct Options
     std::string InputPath;
     std::string JsonPath;
     std::string FrameTimesPath;
+    std::string FrameHashesPath;
+    std::string AudioDumpPath;
     std::vector<FrameAction> Shots;
     std::vector<FrameAction> SaveStates;
 };
@@ -94,6 +96,8 @@ static void Usage()
         "  --input FILE          input script (see README.md)\n"
         "  --audio-hash          include the audio hash in the report\n"
         "  --frame-times FILE    write the time of every frame (frame,ms) as CSV\n"
+        "  --audio-dump FILE     write the raw audio (stereo s16 little-endian) to FILE\n"
+        "  --frame-hashes FILE   write a hash of every frame (frame,screens,audio so far) as CSV\n"
         "  --json FILE           write the report to FILE instead of stdout\n");
 }
 
@@ -125,6 +129,8 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         else if (arg == "--input" && hasValue)      opt.InputPath = argv[++i];
         else if (arg == "--json" && hasValue)       opt.JsonPath = argv[++i];
         else if (arg == "--frame-times" && hasValue) opt.FrameTimesPath = argv[++i];
+        else if (arg == "--frame-hashes" && hasValue) opt.FrameHashesPath = argv[++i];
+        else if (arg == "--audio-dump" && hasValue) opt.AudioDumpPath = argv[++i];
         else if (arg == "--audio-hash")             opt.AudioHash = true;
         else if (arg == "--shot" && hasValue)
         {
@@ -265,14 +271,14 @@ static bool LoadInputScript(const std::string& path, std::vector<InputEvent>& ev
     return true;
 }
 
-// both screens as one 256x384 image, converted from the renderer's BGRA
-static bool WriteScreenshot(NDS& nds, const std::string& path, u64* hash)
+// both screens as one 256x384 RGB image, converted from the renderer's BGRA
+static bool ScreensToRGB(NDS& nds, std::vector<u8>& rgb)
 {
     void* top; void* bottom;
     if (!nds.GPU.GetFramebuffers(&top, &bottom))
         return false;
 
-    std::vector<u8> rgb(256 * 384 * 3);
+    rgb.resize(256 * 384 * 3);
     for (int s = 0; s < 2; s++)
     {
         const u32* src = (const u32*)(s == 0 ? top : bottom);
@@ -284,6 +290,15 @@ static bool WriteScreenshot(NDS& nds, const std::string& path, u64* hash)
             dst[2] = src[i] & 0xFF;
         }
     }
+
+    return true;
+}
+
+static bool WriteScreenshot(NDS& nds, const std::string& path, u64* hash)
+{
+    std::vector<u8> rgb;
+    if (!ScreensToRGB(nds, rgb))
+        return false;
 
     *hash = XXH64(rgb.data(), rgb.size(), 0);
 
@@ -377,10 +392,13 @@ int main(int argc, char** argv)
     u64 audioSamples = 0;
     int audioPeak = 0;
     std::vector<s16> audioBuf(8192 * 2);
+    std::vector<u8> audioDump;
 
     std::vector<double> frameMs;
     frameMs.reserve(opt.Frames);
     std::string frameTimes = "frame,ms\n";
+    std::string frameHashes = "frame,screens,audio\n";
+    std::vector<u8> hashRgb;
 
     struct ShotResult { u32 Frame; std::string File; u64 Hash; };
     std::vector<ShotResult> shotResults;
@@ -434,9 +452,19 @@ int main(int argc, char** argv)
             if (n <= 0) break;
 
             XXH64_update(audioState, audioBuf.data(), n * 2 * sizeof(s16));
+            if (!opt.AudioDumpPath.empty())
+                audioDump.insert(audioDump.end(), (u8*)audioBuf.data(), (u8*)(audioBuf.data() + n * 2));
             audioSamples += n;
             for (int i = 0; i < n * 2; i++)
                 audioPeak = std::max(audioPeak, abs((int)audioBuf[i]));
+        }
+
+        if (!opt.FrameHashesPath.empty() && ScreensToRGB(*nds, hashRgb))
+        {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%u,%016llx,%016llx\n", frame, (unsigned long long)XXH64(hashRgb.data(), hashRgb.size(), 0),
+                     (unsigned long long)XXH64_digest(audioState));
+            frameHashes += buf;
         }
 
         u32 done = frame + 1;
@@ -477,6 +505,18 @@ int main(int argc, char** argv)
     if (!opt.FrameTimesPath.empty() && !WriteFile(opt.FrameTimesPath, frameTimes.data(), (u32)frameTimes.size()))
     {
         fprintf(stderr, "cannot write %s\n", opt.FrameTimesPath.c_str());
+        return 1;
+    }
+
+    if (!opt.FrameHashesPath.empty() && !WriteFile(opt.FrameHashesPath, frameHashes.data(), (u32)frameHashes.size()))
+    {
+        fprintf(stderr, "cannot write %s\n", opt.FrameHashesPath.c_str());
+        return 1;
+    }
+
+    if (!opt.AudioDumpPath.empty() && !WriteFile(opt.AudioDumpPath, audioDump.data(), (u32)audioDump.size()))
+    {
+        fprintf(stderr, "cannot write %s\n", opt.AudioDumpPath.c_str());
         return 1;
     }
 
