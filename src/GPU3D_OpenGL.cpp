@@ -1221,7 +1221,12 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 #ifdef MELONDS_GLES
         // the depth buffer is sampled below: WebGL/ES forbid sampling a texture attached to the bound
         // framebuffer (feedback loop), even with depth writes off. Depth/stencil tests are disabled here anyway.
+        // same for the attribute buffer (color attachment 1): only draw to attachment 0 meanwhile
         glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 0, 0);
+        {
+            GLenum onlycolor[2] = {GL_COLOR_ATTACHMENT0, GL_NONE};
+            glDrawBuffers(2, onlycolor);
+        }
 #endif
 
         glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1282,6 +1287,10 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
 #ifdef MELONDS_GLES
         glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, DepthBufferTex, 0);
+        {
+            GLenum both[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+            glDrawBuffers(2, both);
+        }
 #endif
     }
 }
