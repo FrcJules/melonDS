@@ -65,6 +65,7 @@ struct Options
     u32 Frames = 600;
     u32 Warmup = 0;
     bool JIT = true;
+    bool FastMem = true;
     bool AudioHash = false;
     std::string StatePath;
     std::string InputPath;
@@ -86,6 +87,7 @@ static void Usage()
         "  --frames N            number of frames to run (default 600)\n"
         "  --warmup N            frames run before the timed ones (default 0, included in --frames)\n"
         "  --no-jit              use the interpreter instead of the JIT\n"
+        "  --no-fastmem          JIT without the fast memory mapping (needed under valgrind and qemu)\n"
         "  --state FILE          load a savestate before running\n"
         "  --save-state N:FILE   write a savestate after N frames (repeatable)\n"
         "  --shot N:FILE         write both screens as a PPM after N frames (repeatable)\n"
@@ -118,6 +120,7 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         if (arg == "--frames" && hasValue)          opt.Frames = (u32)strtoul(argv[++i], nullptr, 10);
         else if (arg == "--warmup" && hasValue)     opt.Warmup = (u32)strtoul(argv[++i], nullptr, 10);
         else if (arg == "--no-jit")                 opt.JIT = false;
+        else if (arg == "--no-fastmem")             opt.FastMem = false;
         else if (arg == "--state" && hasValue)      opt.StatePath = argv[++i];
         else if (arg == "--input" && hasValue)      opt.InputPath = argv[++i];
         else if (arg == "--json" && hasValue)       opt.JsonPath = argv[++i];
@@ -326,6 +329,8 @@ int main(int argc, char** argv)
     NDSArgs args;
     if (!opt.JIT)
         args.JIT = std::nullopt;
+    else if (!opt.FastMem)
+        args.JIT->FastMemory = false;
 
     // the console is big, keep it off the stack
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);

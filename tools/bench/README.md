@@ -20,6 +20,7 @@ means after N calls to `RunFrame`.
 | `--frames N` | number of frames to run (default 600) |
 | `--warmup N` | the first N frames are run but not timed |
 | `--no-jit` | interpreter instead of the JIT |
+| `--no-fastmem` | JIT without the fast memory mapping (required under valgrind and qemu-user) |
 | `--state FILE` | load a savestate before running |
 | `--save-state N:FILE` | write a savestate after N frames |
 | `--shot N:FILE` | write both screens (256x384, top then bottom) as PPM after N frames |
@@ -54,3 +55,17 @@ references out of the repository. Speed is printed for information only.
   references per mode. `suite.py` runs the interpreter unless a case sets `"jit": true`.
 - Only the software renderer is supported. OpenGL output depends on the driver and is not covered.
 - Homebrew that expects DLDI storage has no SD card here.
+
+## AArch64 (the Switch CPU architecture) without hardware
+The core has no external dependency, so the tool cross-compiles and runs under `qemu-user`
+(correctness only, the speed is meaningless):
+
+    sudo apt install g++-aarch64-linux-gnu qemu-user
+    cmake -B build-arm64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=aarch64.cmake \
+          -DBUILD_BENCH=ON -DBUILD_QT_SDL=OFF -DENABLE_OGLRENDERER=OFF -DENABLE_GDBSTUB=OFF \
+          -DCMAKE_EXE_LINKER_FLAGS=-static
+    cmake --build build-arm64 --target melonDS-bench
+    qemu-aarch64 build-arm64/melonDS-bench game.nds --frames 300 --no-fastmem --shot 300:a64.ppm
+
+with a toolchain file setting `CMAKE_SYSTEM_NAME Linux`, `CMAKE_SYSTEM_PROCESSOR aarch64` and the
+`aarch64-linux-gnu-gcc/g++` compilers. This exercises the ARM64 JIT backend.
