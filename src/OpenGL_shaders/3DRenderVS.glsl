@@ -34,7 +34,7 @@ void main()
     fpos.xy = (((vec2(vPosition.xy) ) * 2.0) / uScreenSize) - 1.0;
 #ifdef WBuffer
     fZ = float(vPosition.z << zshift) / 16777216.0;
-    fpos.z = 0;
+    fpos.z = 0.0;
 #else
     fpos.z = (float(vPosition.z << zshift) / 8388608.0) - 1.0;
 #endif

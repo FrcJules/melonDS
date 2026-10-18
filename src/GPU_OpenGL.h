@@ -23,7 +23,9 @@
 #include "GPU.h"
 #include "GPU2D_OpenGL.h"
 #include "GPU3D_OpenGL.h"
+#ifndef OGL_COMPUTE_DISABLED
 #include "GPU3D_Compute.h"
+#endif
 
 namespace melonDS
 {
@@ -58,7 +60,9 @@ public:
 private:
     friend class GLRenderer2D;
     friend class GLRenderer3D;
+#ifndef OGL_COMPUTE_DISABLED
     friend class ComputeRenderer3D;
+#endif
 
     bool IsCompute;
 

@@ -255,7 +255,9 @@ bool GLRenderer3D::Init()
     glEnableVertexAttribArray(2); // texcoords
     glVertexAttribIPointer(2, 2, GL_SHORT, 7*4, (void*)(3*4));
     glEnableVertexAttribArray(3); // attrib
-    glVertexAttribIPointer(3, 3, GL_UNSIGNED_INT, 7*4, (void*)(4*4));
+    // the shader input is an ivec3: WebGL2 requires the attribute type to match it (desktop OpenGL does not care);
+    // the bits are the same, only their interpretation as signed differs
+    glVertexAttribIPointer(3, 3, GL_INT, 7*4, (void*)(4*4));
 
     glGenBuffers(1, &IndexBufferID);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, IndexBufferID);
@@ -1382,9 +1384,14 @@ void GLRenderer3D::RenderFrame()
     ShaderConfig.uFogShift = GPU3D.RenderFogShift;
 
     glBindBuffer(GL_UNIFORM_BUFFER, ShaderConfigUBO);
+#ifdef MELONDS_GLES
+    // glMapBuffer does not exist in OpenGL ES / WebGL
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ShaderConfig), &ShaderConfig);
+#else
     void* unibuf = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
     if (unibuf) memcpy(unibuf, &ShaderConfig, sizeof(ShaderConfig));
     glUnmapBuffer(GL_UNIFORM_BUFFER);
+#endif
 
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_DEPTH_TEST);

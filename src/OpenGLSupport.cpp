@@ -19,6 +19,10 @@
 #include "OpenGLSupport.h"
 
 #include <unordered_map>
+#ifdef MELONDS_GLES
+#include <regex>
+#include <string>
+#endif
 #include <vector>
 
 #include <assert.h>
@@ -256,6 +260,14 @@ bool LinkProgram(GLuint& result, GLuint* ids, int numIds)
     return true;
 }
 
+#ifdef OGL_COMPUTE_DISABLED
+bool CompileComputeProgram(GLuint& result, const std::string& source, const std::string& name)
+{
+    Log(LogLevel::Error, "OpenGL: compute shaders are not supported on this platform (%s)\n", name.c_str());
+    result = 0;
+    return false;
+}
+#else
 bool CompileComputeProgram(GLuint& result, const std::string& source, const std::string& name)
 {
     result = glCreateProgram();
@@ -314,6 +326,40 @@ error:
 
     return linkingSucess;
 }
+#endif // OGL_COMPUTE_DISABLED
+
+#ifdef MELONDS_GLES
+// The shaders are written as GLSL 1.40. For OpenGL ES 3.0 / WebGL2 the version line is replaced and
+// the fragment outputs get explicit locations (there is no glBindFragDataLocation in ES).
+static std::string AdaptShaderES(const std::string& source, const std::initializer_list<AttributeTarget>& fragmentOuts)
+{
+    std::string out = source;
+
+    const std::string version = "#version 140";
+    size_t pos = out.find(version);
+    if (pos != std::string::npos)
+    {
+        out.replace(pos, version.size(),
+                    "#version 300 es\n"
+                    "precision highp float;\n"
+                    "precision highp int;\n"
+                    "precision highp sampler2D;\n"
+                    "precision highp usampler2D;\n"
+                    "precision highp isampler2D;\n"
+                    "precision highp sampler2DArray;\n"
+                    "precision highp usampler2DArray;\n"
+                    "precision highp isampler2DArray;");
+    }
+
+    for (const AttributeTarget& target : fragmentOuts)
+    {
+        std::regex re(std::string("\\bout\\s+(\\w+)\\s+") + target.Name + "\\s*;");
+        out = std::regex_replace(out, re, "layout(location = " + std::to_string(target.Location) + ") out $1 " + target.Name + ";");
+    }
+
+    return out;
+}
+#endif
 
 bool CompileVertexFragmentProgram(GLuint& result,
     const std::string& vs, const std::string& fs,
@@ -330,21 +376,31 @@ bool CompileVertexFragmentProgram(GLuint& result,
 
     bool linkingSucess = false;
 
+#ifdef MELONDS_GLES
+    if (!CompilerShader(shaders[0], AdaptShaderES(vs, {}), name, "vertex"))
+        goto error;
+
+    if (!CompilerShader(shaders[1], AdaptShaderES(fs, fragmentOutAttrs), name, "fragment"))
+        goto error;
+#else
     if (!CompilerShader(shaders[0], vs, name, "vertex"))
         goto error;
 
     if (!CompilerShader(shaders[1], fs, name, "fragment"))
         goto error;
+#endif
 
 
     for (const AttributeTarget& target : vertexInAttrs)
     {
         glBindAttribLocation(result, target.Location, target.Name);
     }
+#ifndef MELONDS_GLES
     for (const AttributeTarget& target : fragmentOutAttrs)
     {
         glBindFragDataLocation(result, target.Location, target.Name);
     }
+#endif
 
     linkingSucess = LinkProgram(result, shaders, 2);
 
