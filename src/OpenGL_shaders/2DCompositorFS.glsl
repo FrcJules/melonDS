@@ -68,21 +68,37 @@ ivec3 ConvertColor(int col)
 
 vec4 BG0Fetch(vec2 coord)
 {
+    // CLAMP_TO_BORDER emulated here (not available in GLES/WebGL2); border color is transparent black
+    if (uBGConfig[0].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+        return vec4(0.0);
+
     return texture(BGLayerTex[0], coord);
 }
 
 vec4 BG1Fetch(vec2 coord)
 {
+    // CLAMP_TO_BORDER emulated here (not available in GLES/WebGL2); border color is transparent black
+    if (uBGConfig[1].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+        return vec4(0.0);
+
     return texture(BGLayerTex[1], coord);
 }
 
 vec4 BG2Fetch(vec2 coord)
 {
+    // CLAMP_TO_BORDER emulated here (not available in GLES/WebGL2); border color is transparent black
+    if (uBGConfig[2].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+        return vec4(0.0);
+
     return texture(BGLayerTex[2], coord);
 }
 
 vec4 BG3Fetch(vec2 coord)
 {
+    // CLAMP_TO_BORDER emulated here (not available in GLES/WebGL2); border color is transparent black
+    if (uBGConfig[3].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+        return vec4(0.0);
+
     return texture(BGLayerTex[3], coord);
 }
 

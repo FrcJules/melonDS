@@ -791,6 +791,10 @@ void GLRenderer3D::SetupPolygonTexture(const RendererPolygon* poly) const
     {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, poly->TexID);
+
+        // no texture bound: nothing to sample, and WebGL has no default texture to set parameters on
+        if (poly->TexID == 0)
+            return;
     }
 
     GLint repeatS, repeatT;

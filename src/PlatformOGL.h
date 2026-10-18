@@ -29,7 +29,7 @@
 // per-attachment color masks need OES_draw_buffers_indexed (a WebGL2 extension that must be enabled)
 #define glColorMaski glColorMaskiOES
 
-// ES has no border color: clamp to the edge instead (small visual difference on clamped backgrounds)
+// ES has no border color: clamp to the edge; the 2D compositor shader emulates the transparent border itself
 #define GL_CLAMP_TO_BORDER GL_CLAMP_TO_EDGE
 
 static inline void glDrawBuffer(GLenum buffer)
