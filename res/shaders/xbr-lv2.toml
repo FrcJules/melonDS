@@ -1,0 +1,7 @@
+# xBR lv2 (Hyllian): pixel art upscaler, designed for 3x output; works on the native image
+name = "xBR lv2"
+
+[[pass]]
+shader = "xbr-lv2.glsl"
+scale_type = "viewport"
+filter = "nearest"

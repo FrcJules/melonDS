@@ -32,11 +32,12 @@ Stick to the subset common to GLSL 1.50 and GLSL ES 3.00 (`in`/`out`, `texture()
 * uniforms: `MVPMatrix`, `Texture`, `TextureSize`, `InputSize`, `OutputSize`, `FrameCount`, `FrameDirection`
 * fragment output: `FragColor`
 
-Shaders that use `texture2D`, `varying`, or their own `#version` line need to be ported first.
+Shaders that use `texture2D`, `varying`, their own `#version` line, or several input textures need to be ported first (see the notes at the top of `xbr-lv2.glsl`).
 
 ## Included files
 
 | File | Licence |
 |---|---|
 | `sharp-bilinear.glsl` | Public domain (Themaister), taken from libretro/glsl-shaders |
+| `xbr-lv2.glsl` | MIT (Hyllian, 2011-2016), taken from libretro/glsl-shaders; small port notes in the file, licence text kept |
 | `passthrough.glsl`, presets | GPL-3.0-or-later (melonDS team) |
