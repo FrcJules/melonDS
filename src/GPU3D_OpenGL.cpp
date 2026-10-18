@@ -1218,6 +1218,12 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
     if (GPU3D.RenderDispCnt & 0x00A0) // fog/edge enabled
     {
+#ifdef MELONDS_GLES
+        // the depth buffer is sampled below: WebGL/ES forbid sampling a texture attached to the bound
+        // framebuffer (feedback loop), even with depth writes off. Depth/stencil tests are disabled here anyway.
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 0, 0);
+#endif
+
         glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 
@@ -1273,6 +1279,10 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
             glDrawArrays(GL_TRIANGLES, 0, 2*3);
         }
+
+#ifdef MELONDS_GLES
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, DepthBufferTex, 0);
+#endif
     }
 }
 
