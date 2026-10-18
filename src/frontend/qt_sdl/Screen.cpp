@@ -876,6 +876,8 @@ ScreenPanelGL::ScreenPanelGL(QWidget* parent) : ScreenPanel(parent)
     setMinimumSize(screenGetMinSize());
 
     glInited = false;
+
+    setShader(mainWindow->getWindowConfig().GetString("ScreenShader"));
 }
 
 ScreenPanelGL::~ScreenPanelGL()
@@ -1038,6 +1040,8 @@ void ScreenPanelGL::deinitOpenGL()
 
     glDeleteProgram(screenShaderProgram);
 
+    shaderChain.Unload();
+    shaderDirty = true; // reload the preset if GL gets initialised again
 
     for (const auto& [key, tex] : osdTextures)
     {
@@ -1101,6 +1105,58 @@ void ScreenPanelGL::osdDeleteItem(OSDItem* item)
     ScreenPanel::osdDeleteItem(item);
 }
 
+void ScreenPanelGL::setShader(const std::string& preset)
+{
+    screenSettingsLock.lock();
+    pendingShader = preset;
+    shaderDirty = true;
+    screenSettingsLock.unlock();
+}
+
+// returns false if a shader was requested but could not be loaded
+bool ScreenPanelGL::applyPendingShader()
+{
+    screenSettingsLock.lock();
+    bool dirty = shaderDirty;
+    std::string preset = pendingShader;
+    shaderDirty = false;
+    screenSettingsLock.unlock();
+
+    if (!dirty)
+        return true;
+
+    shaderChain.Unload();
+    if (preset.empty())
+        return true;
+
+    if (shaderChain.Load(preset))
+        return true;
+
+    std::string msg = "Shader failed: " + shaderChain.GetError() + ", using default";
+    osdAddMessage(0xFFA0A0, msg.c_str());
+    return false;
+}
+
+bool ScreenPanelGL::drawWithShaderChain(int w, int h, float factor)
+{
+    GLint texW = 0, texH = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D_ARRAY, 0, GL_TEXTURE_WIDTH, &texW);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D_ARRAY, 0, GL_TEXTURE_HEIGHT, &texH);
+
+    GLint srcTex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &srcTex);
+
+    for (int i = 0; i < numScreens; i++)
+    {
+        if (!shaderChain.Draw(srcTex, texW, texH, screenKind[i] == 0 ? 0 : 1, i, screenMatrix[i],
+                              w / factor, h / factor, factor, shaderFrameCount))
+            return false;
+    }
+
+    shaderFrameCount++;
+    return true;
+}
+
 void ScreenPanelGL::drawScreen()
 {
     if (!glContext) return;
@@ -1108,6 +1164,8 @@ void ScreenPanelGL::drawScreen()
     auto emuThread = emuInstance->getEmuThread();
 
     glContext->MakeCurrent();
+
+    applyPendingShader();
 
     int w = windowInfo.surface_width;
     int h = windowInfo.surface_height;
@@ -1159,13 +1217,32 @@ void ScreenPanelGL::drawScreen()
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, filter);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, filter);
 
-        glBindBuffer(GL_ARRAY_BUFFER, screenVertexBuffer);
-        glBindVertexArray(screenVertexArray);
-
-        for (int i = 0; i < numScreens; i++)
+        bool drawn = false;
+        if (shaderChain.IsLoaded())
         {
-            glUniformMatrix2x3fv(screenShaderTransformULoc, 1, GL_TRUE, screenMatrix[i]);
-            glDrawArrays(GL_TRIANGLES, screenKind[i] == 0 ? 0 : 2 * 3, 2 * 3);
+            drawn = drawWithShaderChain(w, h, factor);
+            if (!drawn)
+            {
+                // something went wrong: drop the chain and use the regular path
+                shaderChain.Unload();
+                Platform::Log(Platform::LogLevel::Error, "ShaderChain: drawing failed, falling back to default\n");
+                osdAddMessage(0xFFA0A0, "Shader failed at runtime, using default");
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glViewport(0, 0, w, h);
+                glUseProgram(screenShaderProgram);
+            }
+        }
+
+        if (!drawn)
+        {
+            glBindBuffer(GL_ARRAY_BUFFER, screenVertexBuffer);
+            glBindVertexArray(screenVertexArray);
+
+            for (int i = 0; i < numScreens; i++)
+            {
+                glUniformMatrix2x3fv(screenShaderTransformULoc, 1, GL_TRUE, screenMatrix[i]);
+                glDrawArrays(GL_TRIANGLES, screenKind[i] == 0 ? 0 : 2 * 3, 2 * 3);
+            }
         }
 
         screenSettingsLock.unlock();

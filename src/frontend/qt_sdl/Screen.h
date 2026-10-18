@@ -32,6 +32,7 @@
 
 #include "glad/glad.h"
 #include "ScreenLayout.h"
+#include "ShaderChain.h"
 #include "duckstation/gl/context.h"
 
 
@@ -59,6 +60,7 @@ public:
     virtual ~ScreenPanel();
 
     void setFilter(bool filter);
+    virtual void setShader(const std::string& preset) {}
 
     void setMouseHide(bool enable, int delay);
 
@@ -205,6 +207,8 @@ public:
     GL::Context* getContext() { return glContext.get(); }
 
     void transferLayout();
+
+    void setShader(const std::string& preset) override;
 protected:
 
     qreal devicePixelRatioFromScreen() const;
@@ -238,6 +242,15 @@ private:
     std::map<unsigned int, GLuint> osdTextures;
 
     GLuint logoTexture;
+
+    // shader chain: setShader() only records the request, it is applied
+    // in drawScreen() where the GL context is current
+    melonDS::ShaderChain shaderChain;
+    std::string pendingShader;
+    bool shaderDirty = false;
+    melonDS::u32 shaderFrameCount = 0;
+    bool applyPendingShader();
+    bool drawWithShaderChain(int w, int h, float factor);
 
     void osdRenderItem(OSDItem* item) override;
     void osdDeleteItem(OSDItem* item) override;

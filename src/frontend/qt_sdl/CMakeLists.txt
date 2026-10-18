@@ -48,6 +48,7 @@ set(SOURCES_QT_SDL
     ArchiveUtil.cpp
 
     ../ScreenLayout.cpp
+    ../ShaderChain.cpp
     ../mic_blow.h
 
     ../glad/glad.c

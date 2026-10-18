@@ -1,0 +1,14 @@
+# Two passes: 3x nearest-neighbour prescale, then a bilinear stretch to the window.
+# Example of a multi-pass preset using a plain copy shader.
+name = "Prescale 3x then bilinear"
+
+[[pass]]
+shader = "passthrough.glsl"
+scale_type = "source"
+scale = 3
+filter = "nearest"
+
+[[pass]]
+shader = "passthrough.glsl"
+scale_type = "viewport"
+filter = "linear"

@@ -169,6 +169,8 @@ private slots:
     void onChangeIntegerScaling(bool checked);
     void onOpenNewWindow();
     void onChangeScreenFiltering(bool checked);
+    void onScreenShaderMenuAboutToShow();
+    void onChangeScreenShader(QAction* act);
     void onChangeShowOSD(bool checked);
     void onChangeLimitFramerate(bool checked);
     void onChangeAudioSync(bool checked);
@@ -291,6 +293,8 @@ public:
     QAction** actScreenAspectBot;
     QAction* actNewWindow;
     QAction* actScreenFiltering;
+    QMenu* menuScreenShader;
+    QActionGroup* grpScreenShader;
     QAction* actShowOSD;
     QAction* actLimitFramerate;
     QAction* actAudioSync;
