@@ -43,14 +43,14 @@ void main()
 
     int texwidth = vPolygonAttr.z & 0xFFFF;
     int texheight = (vPolygonAttr.z >> 16) & 0xFFFF;
-    vec2 texfactor = 1.0 / (16 * vec2(texwidth, texheight));
+    vec2 texfactor = 1.0 / (16.0 * vec2(texwidth, texheight));
 
     vec2 texcoord = vec2(vTexcoord);
     int capyoffset = vPolygonAttr.y >> 16;
     int attrz = 0;
     if (capyoffset != -1)
     {
-        texcoord.y += capyoffset;
+        texcoord.y += float(capyoffset);
         if (texwidth == 128)
             attrz = 1;
         else
