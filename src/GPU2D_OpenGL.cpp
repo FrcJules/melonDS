@@ -1171,6 +1171,7 @@ void GLRenderer2D::UpdateLayerConfig()
                 if (bgcnt & (1<<2))
                 {
                     mapsz <<= 1;
+                    BGVRAMRange[layer][3] = mapsz;
 
                     int capblock = -1;
                     if ((cfg.Size[0] == 128) || (cfg.Size[0] == 256))
