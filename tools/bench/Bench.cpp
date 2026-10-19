@@ -319,11 +319,11 @@ static bool ReadGLScreens(NDS& nds, std::vector<u8>& rgb)
     {
         glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, layer);
         glReadPixels(0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-        // glReadPixels starts at the bottom row
+        // texture row 0 is the top line of the screen
         for (int y = 0; y < 192; y++)
             for (int x = 0; x < 256; x++)
             {
-                const u8* src = &px[((191 - y) * 256 + x) * 4];
+                const u8* src = &px[(y * 256 + x) * 4];
                 u8* dst = &rgb[((layer * 192 + y) * 256 + x) * 3];
                 dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
             }
