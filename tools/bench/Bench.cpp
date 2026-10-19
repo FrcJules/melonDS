@@ -38,6 +38,11 @@
 #include "Savestate.h"
 #include "xxhash/xxhash.h"
 
+#ifdef BENCH_GL
+#include <EGL/egl.h>
+#include "GPU_OpenGL.h"
+#endif
+
 using namespace melonDS;
 
 namespace melonDS::Platform
@@ -67,6 +72,7 @@ struct Options
     bool JIT = true;
     bool FastMem = true;
     bool Threaded3D = false;
+    bool OpenGL = false;   // --gl : renderer OpenGL natif (EGL sans fenêtre + Mesa), échelle 1 ; ignoré sans BENCH_GL
     bool AudioHash = false;
     std::string StatePath;
     std::string InputPath;
@@ -128,6 +134,7 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         else if (arg == "--no-jit")                 opt.JIT = false;
         else if (arg == "--no-fastmem")             opt.FastMem = false;
         else if (arg == "--threaded-3d")            opt.Threaded3D = true;
+        else if (arg == "--gl")                     opt.OpenGL = true;
         else if (arg == "--state" && hasValue)      opt.StatePath = argv[++i];
         else if (arg == "--input" && hasValue)      opt.InputPath = argv[++i];
         else if (arg == "--json" && hasValue)       opt.JsonPath = argv[++i];
@@ -274,9 +281,66 @@ static bool LoadInputScript(const std::string& path, std::vector<InputEvent>& ev
     return true;
 }
 
+#ifdef BENCH_GL
+// OpenGL 4.3 core context without a window (EGL surfaceless), functions loaded through glad
+static bool InitGL()
+{
+    EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (dpy == EGL_NO_DISPLAY || !eglInitialize(dpy, nullptr, nullptr)) { fprintf(stderr, "EGL: no display\n"); return false; }
+    eglBindAPI(EGL_OPENGL_API);
+    const EGLint cfgAttrs[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE };
+    EGLConfig cfg; EGLint n = 0;
+    if (!eglChooseConfig(dpy, cfgAttrs, &cfg, 1, &n) || n < 1) { fprintf(stderr, "EGL: no config\n"); return false; }
+    const EGLint ctxAttrs[] = { EGL_CONTEXT_MAJOR_VERSION, 4, EGL_CONTEXT_MINOR_VERSION, 3,
+                                EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE };
+    EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttrs);
+    if (ctx == EGL_NO_CONTEXT) { fprintf(stderr, "EGL: no GL 4.3 core context\n"); return false; }
+    const EGLint pbAttrs[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
+    EGLSurface surf = eglCreatePbufferSurface(dpy, cfg, pbAttrs);
+    if (!eglMakeCurrent(dpy, surf, surf, ctx)) { fprintf(stderr, "EGL: make current failed\n"); return false; }
+    if (!gladLoadGLLoader((GLADloadproc)eglGetProcAddress)) { fprintf(stderr, "glad: cannot load GL functions\n"); return false; }
+    fprintf(stderr, "GL: %s / %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
+    return true;
+}
+
+// the GL renderer exposes one array texture with both screens (layer 0 top, 1 bottom)
+static bool ReadGLScreens(NDS& nds, std::vector<u8>& rgb)
+{
+    void* top; void* bottom;
+    if (nds.GPU.GetFramebuffers(&top, &bottom))
+        return false;
+    GLuint tex = *(GLuint*)top;
+    GLuint fbo;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    rgb.resize(256 * 384 * 3);
+    std::vector<u8> px(256 * 192 * 4);
+    for (int layer = 0; layer < 2; layer++)
+    {
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, 0, layer);
+        glReadPixels(0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        // glReadPixels starts at the bottom row
+        for (int y = 0; y < 192; y++)
+            for (int x = 0; x < 256; x++)
+            {
+                const u8* src = &px[((191 - y) * 256 + x) * 4];
+                u8* dst = &rgb[((layer * 192 + y) * 256 + x) * 3];
+                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+            }
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    return true;
+}
+#endif
+
 // both screens as one 256x384 RGB image, converted from the renderer's BGRA
 static bool ScreensToRGB(NDS& nds, std::vector<u8>& rgb)
 {
+#ifdef BENCH_GL
+    if (ReadGLScreens(nds, rgb))
+        return true;
+#endif
     void* top; void* bottom;
     if (!nds.GPU.GetFramebuffers(&top, &bottom))
         return false;
@@ -364,6 +428,24 @@ int main(int argc, char** argv)
     nds->SetNDSCart(std::move(cart));
     nds->Reset();
 
+#ifdef BENCH_GL
+    if (opt.OpenGL)
+    {
+        if (!InitGL())
+            return 1;
+        nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
+        RendererSettings settings {};
+        settings.ScaleFactor = 1;
+        settings.Threaded = false;
+        settings.HiresCoordinates = true;
+        settings.BetterPolygons = false;
+        nds->GetRenderer().SetRenderSettings(settings);
+        int cur, cnt;
+        while (nds->GetRenderer().NeedsShaderCompile())
+            nds->GetRenderer().ShaderCompileStep(cur, cnt);
+    }
+    else
+#endif
     if (opt.Threaded3D)
     {
         RendererSettings settings {};
