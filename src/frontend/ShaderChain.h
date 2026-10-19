@@ -19,6 +19,7 @@
 #ifndef SHADERCHAIN_H
 #define SHADERCHAIN_H
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,12 @@ class ShaderChain
 {
 public:
     static constexpr int kMaxPasses = 8;
+
+    // Replaces the file system for reading presets and shaders: receives the same path as
+    // Platform::OpenFile would ("shaders/<name>") and returns the file content. Pass an empty
+    // function to go back to the file system.
+    using FileReader = std::function<bool(const std::string& path, std::string& out)>;
+    static void SetFileReader(FileReader reader);
 
     ShaderChain() = default;
     ~ShaderChain();

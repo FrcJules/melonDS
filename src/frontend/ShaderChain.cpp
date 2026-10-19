@@ -32,8 +32,15 @@ using Platform::Log;
 using Platform::LogLevel;
 
 // the shaders only use features common to GLSL 1.50 and GLSL ES 3.00
-// a WebGL2 build would use "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+#ifdef MELONDS_GLES
+static const char* const kVersionHeader =
+    "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\n";
+#else
 static const char* const kVersionHeader = "#version 150\n";
+#endif
+
+// optional replacement for the file system (the WebAssembly build has none)
+static ShaderChain::FileReader sFileReader;
 
 static const char* const kCopyVS = R"(
 in vec2 vPosition;
@@ -75,6 +82,9 @@ static const int kMaxTargetSize = 16384;
 
 static bool ReadTextFile(const std::string& path, std::string& out)
 {
+    if (sFileReader)
+        return sFileReader(path, out);
+
     Platform::FileHandle* file = Platform::OpenFile(path, Platform::FileMode::Read);
     if (!file)
         return false;
@@ -101,6 +111,11 @@ static std::string DirectoryOf(const std::string& path)
     return path.substr(0, pos + 1);
 }
 
+
+void ShaderChain::SetFileReader(FileReader reader)
+{
+    sFileReader = std::move(reader);
+}
 
 ShaderChain::~ShaderChain()
 {
