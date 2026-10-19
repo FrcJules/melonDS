@@ -30,9 +30,10 @@ Stick to the subset common to GLSL 1.50 and GLSL ES 3.00 (`in`/`out`, `texture()
 
 * attributes: `VertexCoord`, `TexCoord`
 * uniforms: `MVPMatrix`, `Texture`, `TextureSize`, `InputSize`, `OutputSize`, `FrameCount`, `FrameDirection`
+* earlier results: `PassPrevNTexture` (output of N passes back; N = 1 is `Texture`), with `PassPrevNTextureSize` / `PassPrevNInputSize`, and `OrigTexture` (the unfiltered screen) with `OrigTextureSize` / `OrigInputSize`
 * fragment output: `FragColor`
 
-Shaders that use `texture2D`, `varying`, their own `#version` line, or several input textures need to be ported first (see the notes at the top of `xbr-lv2.glsl`).
+Shaders that use `texture2D`, `varying` or their own `#version` line need to be ported first (see the notes at the top of `xbr-lv2.glsl`).
 
 ## Included files
 
@@ -40,4 +41,5 @@ Shaders that use `texture2D`, `varying`, their own `#version` line, or several i
 |---|---|
 | `sharp-bilinear.glsl` | Public domain (Themaister), taken from libretro/glsl-shaders |
 | `xbr-lv2.glsl` | MIT (Hyllian, 2011-2016), taken from libretro/glsl-shaders; small port notes in the file, licence text kept |
+| `scalefx-pass0..4.glsl`, `scalefx.toml` | MIT (Sp00kyFox, 2016), taken from libretro/glsl-shaders; only the `#version` line removed, licence text kept. Preset: 4 analysis passes, 3x output, bilinear stretch |
 | `passthrough.glsl`, presets | GPL-3.0-or-later (melonDS team) |

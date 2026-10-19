@@ -1,0 +1,27 @@
+# ScaleFX (Sp00kyFox): edge interpolation for pixel art, 4 analysis passes + 3x output,
+# then a bilinear stretch to the window. Passes 0 and 1 store data in float textures.
+name = "ScaleFX"
+
+[[pass]]
+shader = "scalefx-pass0.glsl"
+float = true
+
+[[pass]]
+shader = "scalefx-pass1.glsl"
+float = true
+
+[[pass]]
+shader = "scalefx-pass2.glsl"
+
+[[pass]]
+shader = "scalefx-pass3.glsl"
+
+[[pass]]
+shader = "scalefx-pass4.glsl"
+scale_type = "source"
+scale = 3
+
+[[pass]]
+shader = "passthrough.glsl"
+scale_type = "viewport"
+filter = "linear"
