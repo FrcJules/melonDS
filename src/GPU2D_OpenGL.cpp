@@ -122,7 +122,7 @@ bool GLRenderer2D::InitShaders()
     uniloc = glGetUniformBlockIndex(SpriteShader, "ubSpriteConfig");
     glUniformBlockBinding(SpriteShader, uniloc, 21);
     uniloc = glGetUniformBlockIndex(SpriteShader, "ubSpriteScanlineConfig");
-    glUniformBlockBinding(SpriteShader, uniloc, 24);
+    glUniformBlockBinding(SpriteShader, uniloc, 19);
 
     SpriteRenderTransULoc = glGetUniformLocation(SpriteShader, "uRenderTransparent");
 
@@ -1626,7 +1626,7 @@ void GLRenderer2D::DoRenderSprites(int line)
     glDisable(GL_BLEND);
 
     glBindBufferBase(GL_UNIFORM_BUFFER, 21, SpriteConfigUBO);
-    glBindBufferBase(GL_UNIFORM_BUFFER, 24, SpriteScanlineConfigUBO);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 19, SpriteScanlineConfigUBO);
 
     glBindBuffer(GL_UNIFORM_BUFFER, SpriteScanlineConfigUBO);
     glBufferSubData(GL_UNIFORM_BUFFER,

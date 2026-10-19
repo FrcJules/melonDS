@@ -192,13 +192,13 @@ bool GLRenderer::Init()
     glBindBuffer(GL_UNIFORM_BUFFER, FPConfigUBO);
     static_assert((sizeof(sFinalPassConfig) & 15) == 0);
     glBufferData(GL_UNIFORM_BUFFER, sizeof(sFinalPassConfig), nullptr, GL_STREAM_DRAW);
-    glBindBufferBase(GL_UNIFORM_BUFFER, 30, FPConfigUBO);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 18, FPConfigUBO);
 
     glGenBuffers(1, &CaptureConfigUBO);
     glBindBuffer(GL_UNIFORM_BUFFER, CaptureConfigUBO);
     static_assert((sizeof(sCaptureConfig) & 15) == 0);
     glBufferData(GL_UNIFORM_BUFFER, sizeof(sCaptureConfig), nullptr, GL_STREAM_DRAW);
-    glBindBufferBase(GL_UNIFORM_BUFFER, 31, CaptureConfigUBO);
+    glBindBufferBase(GL_UNIFORM_BUFFER, 17, CaptureConfigUBO);
 
     // shader config
 
@@ -212,7 +212,7 @@ bool GLRenderer::Init()
     glUniform1i(uniloc, 2);
 
     uniloc = glGetUniformBlockIndex(FPShader, "ubFinalPassConfig");
-    glUniformBlockBinding(FPShader, uniloc, 30);
+    glUniformBlockBinding(FPShader, uniloc, 18);
 
 
     glUseProgram(CaptureShader);
@@ -223,7 +223,7 @@ bool GLRenderer::Init()
     glUniform1i(uniloc, 1);
 
     uniloc = glGetUniformBlockIndex(CaptureShader, "ubCaptureConfig");
-    glUniformBlockBinding(CaptureShader, uniloc, 31);
+    glUniformBlockBinding(CaptureShader, uniloc, 17);
 
 
     glUseProgram(CapDownShader);
