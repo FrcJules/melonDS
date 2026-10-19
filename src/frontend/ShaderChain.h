@@ -39,11 +39,15 @@ namespace melonDS
 //   scale_type = "viewport"          # "source" (default) or "viewport"
 //   scale = 1                        # integer multiplier for "source"
 //   filter = "linear"                # "nearest" (default) or "linear"
+//   float = true                     # 32-bit float output (default false), for data passes
 //
 // Shaders are single files with VERTEX and FRAGMENT sections (libretro GLSL
 // convention). The loader prepends the #version line and #define VERTEX or
 // FRAGMENT. Uniforms provided: MVPMatrix, Texture, TextureSize, InputSize,
 // OutputSize, FrameCount, FrameDirection. Attributes: VertexCoord, TexCoord.
+// A pass can also read earlier results: PassPrevNTexture (N passes back, with
+// PassPrevNTextureSize and PassPrevNInputSize; PassPrev1 is Texture) and
+// OrigTexture (the unfiltered screen, with OrigTextureSize and OrigInputSize).
 //
 // Shader sources must stick to the subset common to GLSL 1.50 and GLSL ES 3.00
 // so the same files can be used with WebGL2.
@@ -95,6 +99,9 @@ private:
         bool ViewportScale = false;
         int Scale = 1;
         bool Linear = false;
+        bool Float = false;
+        // PassPrev1..kMaxPasses (index N-1) and Orig (index kMaxPasses)
+        GLint PrevTexLoc[kMaxPasses + 1], PrevSizeLoc[kMaxPasses + 1], PrevInputLoc[kMaxPasses + 1];
     };
 
     struct Target
@@ -102,6 +109,7 @@ private:
         GLuint Tex = 0;
         GLuint FBO = 0;
         int W = 0, H = 0;
+        bool Float = false;
     };
 
     // per screen transform slot: copy of the source layer + one target per pass but the last
@@ -122,7 +130,7 @@ private:
     GLuint VertexBuffer = 0, VertexArray = 0;
 
     bool CompileCopyProgram();
-    bool EnsureTarget(Target& target, int w, int h);
+    bool EnsureTarget(Target& target, int w, int h, bool isFloat);
     void FreeTarget(Target& target);
 };
 

@@ -17,6 +17,7 @@
 */
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "ShaderChain.h"
@@ -187,6 +188,7 @@ bool ShaderChain::Load(const std::string& presetName)
         bool ViewportScale;
         int Scale;
         bool Linear;
+        bool Float;
     };
     std::vector<PassDesc> descs;
     std::string name;
@@ -207,6 +209,7 @@ bool ShaderChain::Load(const std::string& presetName)
             desc.ViewportScale = toml::find_or<std::string>(p, "scale_type", "source") == "viewport";
             desc.Scale = toml::find_or<int>(p, "scale", 1);
             desc.Linear = toml::find_or<std::string>(p, "filter", "nearest") == "linear";
+            desc.Float = toml::find_or<bool>(p, "float", false);
 
             if (desc.Shader.empty())
                 throw std::runtime_error("pass without shader");
@@ -267,6 +270,21 @@ bool ShaderChain::Load(const std::string& presetName)
         pass.ViewportScale = desc.ViewportScale;
         pass.Scale = desc.Scale;
         pass.Linear = desc.Linear;
+        pass.Float = desc.Float;
+
+        for (int n = 1; n <= kMaxPasses + 1; n++)
+        {
+            char name[64];
+            const char* base = (n <= kMaxPasses) ? nullptr : "Orig";
+            auto loc = [&](const char* suffix) {
+                if (base) snprintf(name, sizeof(name), "%s%s", base, suffix);
+                else      snprintf(name, sizeof(name), "PassPrev%d%s", n, suffix);
+                return glGetUniformLocation(pass.Program, name);
+            };
+            pass.PrevTexLoc[n - 1] = loc("Texture");
+            pass.PrevSizeLoc[n - 1] = loc("TextureSize");
+            pass.PrevInputLoc[n - 1] = loc("InputSize");
+        }
 
         Passes.push_back(pass);
     }
@@ -294,9 +312,9 @@ void ShaderChain::FreeTarget(Target& target)
     target = Target();
 }
 
-bool ShaderChain::EnsureTarget(Target& target, int w, int h)
+bool ShaderChain::EnsureTarget(Target& target, int w, int h, bool isFloat)
 {
-    if (target.Tex && target.W == w && target.H == h)
+    if (target.Tex && target.W == w && target.H == h && target.Float == isFloat)
         return true;
 
     if (w < 1 || h < 1 || w > kMaxTargetSize || h > kMaxTargetSize)
@@ -311,7 +329,10 @@ bool ShaderChain::EnsureTarget(Target& target, int w, int h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    if (isFloat)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
     glGenFramebuffers(1, &target.FBO);
     glBindFramebuffer(GL_FRAMEBUFFER, target.FBO);
@@ -327,6 +348,7 @@ bool ShaderChain::EnsureTarget(Target& target, int w, int h)
 
     target.W = w;
     target.H = h;
+    target.Float = isFloat;
     return true;
 }
 
@@ -352,7 +374,7 @@ bool ShaderChain::Draw(GLuint srcTex, int srcW, int srcH, int layer, int slotInd
     slot.Targets.resize(numPasses);
 
     // targets[0] holds the source layer, targets[i+1] the output of pass i (except the last one)
-    if (!EnsureTarget(slot.Targets[0], srcW, srcH))
+    if (!EnsureTarget(slot.Targets[0], srcW, srcH, false))
         return false;
 
     int w = srcW, h = srcH;
@@ -362,7 +384,7 @@ bool ShaderChain::Draw(GLuint srcTex, int srcW, int srcH, int layer, int slotInd
         if (pass.ViewportScale) { w = outW; h = outH; }
         else                    { w *= pass.Scale; h *= pass.Scale; }
 
-        if (!EnsureTarget(slot.Targets[i + 1], w, h))
+        if (!EnsureTarget(slot.Targets[i + 1], w, h, pass.Float))
             return false;
     }
 
@@ -436,6 +458,29 @@ bool ShaderChain::Draw(GLuint srcTex, int srcW, int srcH, int layer, int slotInd
         if (pass.OutputSizeLoc >= 0)    glUniform2f(pass.OutputSizeLoc, outSizeW, outSizeH);
         if (pass.FrameCountLoc >= 0)    glUniform1i(pass.FrameCountLoc, (GLint)frameCount);
         if (pass.FrameDirectionLoc >= 0) glUniform1i(pass.FrameDirectionLoc, 1);
+
+        // earlier results: PassPrevN reads the input of pass (i + 1 - N), Orig the source layer
+        for (int n = 1; n <= kMaxPasses + 1; n++)
+        {
+            int index = (n <= kMaxPasses) ? (i + 1 - n) : 0;
+            if (index < 0)
+                continue;
+
+            GLint texLoc = pass.PrevTexLoc[n - 1];
+            const Target& prev = slot.Targets[index];
+
+            if (texLoc >= 0)
+            {
+                glActiveTexture(GL_TEXTURE0 + n);
+                glBindTexture(GL_TEXTURE_2D, prev.Tex);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glUniform1i(texLoc, n);
+            }
+            if (pass.PrevSizeLoc[n - 1] >= 0)  glUniform2f(pass.PrevSizeLoc[n - 1], (float)prev.W, (float)prev.H);
+            if (pass.PrevInputLoc[n - 1] >= 0) glUniform2f(pass.PrevInputLoc[n - 1], (float)prev.W, (float)prev.H);
+        }
+        glActiveTexture(GL_TEXTURE0);
 
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
