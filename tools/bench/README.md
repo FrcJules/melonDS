@@ -23,6 +23,7 @@ means after N calls to `RunFrame`.
 | `--threaded-3d` | software 3D renderer on a second thread (measured +18 % on a heavy Pokémon 3D scene) |
 | `--no-fastmem` | JIT without the fast memory mapping (required under valgrind and qemu-user) |
 | `--state FILE` | load a savestate before running |
+| `--sav FILE` | cartridge save data (raw .sav) loaded into the cart before the first frame |
 | `--save-state N:FILE` | write a savestate after N frames |
 | `--shot N:FILE` | write both screens (256x384, top then bottom) as PPM after N frames |
 | `--input FILE` | input script, see below |

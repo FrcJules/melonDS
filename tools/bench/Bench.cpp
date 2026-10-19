@@ -69,6 +69,7 @@ struct Options
     bool Threaded3D = false;
     bool AudioHash = false;
     std::string StatePath;
+    std::string SavePath;      // --sav : cartridge save data (raw .sav) loaded before the first frame
     std::string InputPath;
     std::string JsonPath;
     std::string FrameTimesPath;
@@ -129,6 +130,7 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         else if (arg == "--no-fastmem")             opt.FastMem = false;
         else if (arg == "--threaded-3d")            opt.Threaded3D = true;
         else if (arg == "--state" && hasValue)      opt.StatePath = argv[++i];
+        else if (arg == "--sav" && hasValue)        opt.SavePath = argv[++i];
         else if (arg == "--input" && hasValue)      opt.InputPath = argv[++i];
         else if (arg == "--json" && hasValue)       opt.JsonPath = argv[++i];
         else if (arg == "--frame-times" && hasValue) opt.FrameTimesPath = argv[++i];
@@ -353,8 +355,21 @@ int main(int argc, char** argv)
     // the console is big, keep it off the stack
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);
 
-    // no save data: homebrew and retail ROMs both start with an empty cart
-    auto cart = NDSCart::ParseROM(std::move(romData), romLen, nullptr, NDSCart::NDSCartArgs {});
+    // no save data unless --sav is given: homebrew and retail ROMs both start with an empty cart
+    NDSCart::NDSCartArgs cartArgs {};
+    if (!opt.SavePath.empty())
+    {
+        std::unique_ptr<u8[]> sav;
+        u32 savLen = 0;
+        if (!ReadFile(opt.SavePath, sav, savLen))
+        {
+            fprintf(stderr, "cannot read %s\n", opt.SavePath.c_str());
+            return 1;
+        }
+        cartArgs.SRAM = std::move(sav);
+        cartArgs.SRAMLength = savLen;
+    }
+    auto cart = NDSCart::ParseROM(std::move(romData), romLen, nullptr, std::move(cartArgs));
     if (!cart)
     {
         fprintf(stderr, "failed to parse %s as a DS ROM\n", opt.RomPath.c_str());
