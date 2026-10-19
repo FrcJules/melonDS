@@ -438,7 +438,7 @@ int main(int argc, char** argv)
         settings.ScaleFactor = 1;
         settings.Threaded = false;
         settings.HiresCoordinates = true;
-        settings.BetterPolygons = false;
+        settings.BetterPolygons = getenv("BENCH_BETTER_POLYGONS") != nullptr;   // GL renderer option: quads as real polygons
         nds->GetRenderer().SetRenderSettings(settings);
         int cur, cnt;
         while (nds->GetRenderer().NeedsShaderCompile())
