@@ -27,6 +27,7 @@
 #include <string>
 #include <algorithm>
 
+#include <QDir>
 #include <QProcess>
 #include <QApplication>
 #include <QMessageBox>
@@ -571,6 +572,12 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent) :
             actScreenFiltering->setCheckable(true);
             connect(actScreenFiltering, &QAction::triggered, this, &MainWindow::onChangeScreenFiltering);
 
+            // the list of presets is filled when the menu is about to be shown
+            menuScreenShader = menu->addMenu("Screen shader");
+            grpScreenShader = new QActionGroup(menuScreenShader);
+            connect(menuScreenShader, &QMenu::aboutToShow, this, &MainWindow::onScreenShaderMenuAboutToShow);
+            connect(grpScreenShader, &QActionGroup::triggered, this, &MainWindow::onChangeScreenShader);
+
             actShowOSD = menu->addAction("Show OSD");
             actShowOSD->setCheckable(true);
             connect(actShowOSD, &QAction::triggered, this, &MainWindow::onChangeShowOSD);
@@ -855,7 +862,10 @@ void MainWindow::createScreenPanel()
     setCentralWidget(panel);
 
     if (hasMenu)
+    {
         actScreenFiltering->setEnabled(hasOGL);
+        menuScreenShader->setEnabled(hasOGL);
+    }
     panel->osdSetEnabled(showOSD);
 
     connect(emuThread, SIGNAL(windowUpdate()), panel, SLOT(repaint()));
@@ -2103,6 +2113,54 @@ void MainWindow::onChangeScreenFiltering(bool checked)
 
     //emit screenLayoutChange();
     panel->setFilter(checked);
+}
+
+void MainWindow::onScreenShaderMenuAboutToShow()
+{
+    for (QAction* act : grpScreenShader->actions())
+    {
+        grpScreenShader->removeAction(act);
+        menuScreenShader->removeAction(act);
+        delete act;
+    }
+
+    QString current = QString::fromStdString(windowCfg.GetString("ScreenShader"));
+
+    QAction* none = menuScreenShader->addAction("None");
+    none->setActionGroup(grpScreenShader);
+    none->setData(QString());
+    none->setCheckable(true);
+    none->setChecked(current.isEmpty());
+
+    QDir dir(QString::fromStdString(Platform::GetLocalFilePath("shaders")));
+    QStringList presets = dir.entryList(QStringList() << "*.toml", QDir::Files, QDir::Name);
+
+    for (const QString& preset : presets)
+    {
+        QAction* act = menuScreenShader->addAction(preset);
+        act->setActionGroup(grpScreenShader);
+        act->setData(preset);
+        act->setCheckable(true);
+        act->setChecked(preset == current);
+    }
+
+    // a preset selected earlier but not found in the folder anymore
+    if (!current.isEmpty() && !presets.contains(current))
+    {
+        QAction* act = menuScreenShader->addAction(current + " (missing)");
+        act->setActionGroup(grpScreenShader);
+        act->setData(current);
+        act->setCheckable(true);
+        act->setChecked(true);
+    }
+}
+
+void MainWindow::onChangeScreenShader(QAction* act)
+{
+    QString preset = act->data().toString();
+    windowCfg.SetString("ScreenShader", preset.toStdString());
+
+    panel->setShader(preset.toStdString());
 }
 
 void MainWindow::onChangeShowOSD(bool checked)

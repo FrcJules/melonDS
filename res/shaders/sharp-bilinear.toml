@@ -1,0 +1,7 @@
+# Sharp bilinear: bilinear stretch with an automatic integer nearest-neighbour prescale
+name = "Sharp bilinear"
+
+[[pass]]
+shader = "sharp-bilinear.glsl"
+scale_type = "viewport"
+filter = "linear"
