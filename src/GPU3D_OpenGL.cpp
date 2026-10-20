@@ -646,7 +646,10 @@ void GLRenderer3D::BuildPolygons(GLRenderer3D::RendererPolygon* polygons, int np
         {
             rp->PrimType = GL_TRIANGLES;
 
-            if (!BetterPolygons)
+            // Gouraud interpolation of an untextured quad/polygon is far closer to the console (software renderer) with the
+            // centre-vertex split than with a plain fan, and costs nothing visible: use it for untextured polygons even when
+            // the 'better polygons' option is off (textured ones get slightly worse with it, so they keep following the option).
+            if (!BetterPolygons && curtexid != 0)
             {
                 // regular triangle-splitting
 
