@@ -614,7 +614,7 @@ void GLRenderer3D::BuildPolygons(GLRenderer3D::RendererPolygon* polygons, int np
                 lastx = vtx->FinalPosition[0];
                 lasty = vtx->FinalPosition[1];
 
-                vptr = SetupVertex(poly, j, vtx, vtxattr, curtexlayer, vptr);
+                vptr = SetupVertex(poly, j, vtx, vtxattr | (1<<10), curtexlayer, vptr); // bit 10: line, see 3DRenderVS
 
                 IndexBuffer[iidx++] = vidx;
                 rp->NumIndices++;

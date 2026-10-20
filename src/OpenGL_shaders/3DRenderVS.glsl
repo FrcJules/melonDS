@@ -32,6 +32,10 @@ void main()
 
     vec4 fpos;
     fpos.xy = (((vec2(vPosition.xy) ) * 2.0) / uScreenSize) - 1.0;
+    // lines (degenerate polygons): the console draws them on the pixel whose corner is the vertex, while GL puts an exactly
+    // integer coordinate between two pixels; aim at the pixel centre instead (the flag is bit 10 of the polygon attributes)
+    if ((attr & (1<<10)) != 0)
+        fpos.xy += 1.0 / uScreenSize;
 #ifdef WBuffer
     fZ = float(vPosition.z << zshift) / 16777216.0;
     fpos.z = 0.0;
