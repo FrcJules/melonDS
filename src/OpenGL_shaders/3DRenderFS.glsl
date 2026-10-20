@@ -34,6 +34,12 @@ vec4 FinalColor()
 {
     vec4 col;
     vec4 vcol = fColor;
+
+    // The console samples a texture at the left/top edge of each pixel, GL at its centre: shift the sample by half a pixel
+    // (exact at render scale 1; at higher scales the shift is below what is visible). Derivatives are taken outside any branch.
+    vec2 dtx = dFdx(fTexcoord);
+    vec2 dty = dFdy(fTexcoord);
+    const float texbias = -0.5;
     int blendmode = (fPolygonAttr.x >> 4) & 0x3;
 
     if (blendmode == 2)
@@ -58,7 +64,7 @@ vec4 FinalColor()
     }
     else
     {
-        vec3 texcoord = vec3(fTexcoord, fPolygonAttr.y);
+        vec3 texcoord = vec3(fTexcoord + (dtx + dty) * texbias, fPolygonAttr.y);
         vec4 tcol;
         if (fPolygonAttr.z == 0)
             tcol = vec4(texture(CurTexture, texcoord)) / vec4(63,63,63,31);
