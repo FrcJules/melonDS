@@ -39,6 +39,12 @@ namespace melonDS
 
 bool GLRenderer3D::BuildRenderShader(bool wbuffer)
 {
+    return BuildRenderShaderVariant(wbuffer, RenderShader[(int)wbuffer]) &&
+           BuildRenderShaderVariant(wbuffer, RenderShaderLines[(int)wbuffer]);
+}
+
+bool GLRenderer3D::BuildRenderShaderVariant(bool wbuffer, GLuint& out)
+{
     std::string wbufdef = "#define WBuffer\n";
 
     char shadername[32];
@@ -79,7 +85,7 @@ bool GLRenderer3D::BuildRenderShader(bool wbuffer)
     uni_id = glGetUniformLocation(prog, "Capture256Texture");
     glUniform1i(uni_id, 2);
 
-    RenderShader[(int)wbuffer] = prog;
+    out = prog;
 
     return true;
 }
@@ -162,6 +168,7 @@ bool GLRenderer3D::Init()
     glUniform1i(uni_id, 1);
 
     memset(RenderShader, 0, sizeof(RenderShader));
+    memset(RenderShaderLines, 0, sizeof(RenderShaderLines));
 
     if (!BuildRenderShader(false))
         return false;
@@ -319,6 +326,7 @@ GLRenderer3D::~GLRenderer3D()
 
     for (int i = 0; i < 2; i++)
     {
+        if (RenderShaderLines[i]) glDeleteProgram(RenderShaderLines[i]);
         if (!RenderShader[i]) continue;
         glDeleteProgram(RenderShader[i]);
     }
@@ -927,12 +935,30 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
     glActiveTexture(GL_TEXTURE0);
 
+    // Opaque lines are drawn last, with their own copy of the render program. ANGLE/D3D11 on Intel drops every draw call
+    // that follows a change of primitive type with the same program, which used to make all polygons (or all lines) vanish.
+    bool anylines = false;
+    for (int i = 0; i < NumFinalPolys; i++)
+    {
+        const RendererPolygon* rp = &PolygonList[i];
+        if (rp->PrimType == GL_LINES && !rp->PolyData->IsShadowMask && !rp->PolyData->Translucent) { anylines = true; break; }
+    }
+
+    for (int lines = 0; lines < (anylines ? 2 : 1); lines++)
+    {
+    if (lines == 1)
+    {
+        glUseProgram(RenderShaderLines[(int)flags]);
+        glUniform1i(glGetUniformLocation(RenderShaderLines[(int)flags], "uRenderMode"), RenderMode_Opaque);
+        glUniform1i(glGetUniformLocation(RenderShaderLines[(int)flags], "uAlphaRef"), GPU3D.RenderAlphaRef);
+    }
     for (int i = 0; i < NumFinalPolys; )
     {
         RendererPolygon* rp = &PolygonList[i];
 
         if (rp->PolyData->IsShadowMask) { i++; continue; }
         if (rp->PolyData->Translucent) { i++; continue; }
+        if ((rp->PrimType == GL_LINES) != (lines == 1)) { i++; continue; }
 
         if (rp->PolyData->Attr & (1<<14))
             glDepthFunc(GL_LEQUAL);
@@ -948,6 +974,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
         i += RenderPolygonBatch(i);
     }
+    }
+    if (anylines) glUseProgram(RenderShader[(int)flags]);
 
     // if edge marking is enabled, mark all opaque edges
     // TODO BETTER EDGE MARKING!!! THIS SUCKS

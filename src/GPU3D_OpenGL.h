@@ -76,6 +76,7 @@ private:
     TexcacheOpenGL Texcache;
 
     bool BuildRenderShader(bool wbuffer);
+    bool BuildRenderShaderVariant(bool wbuffer, GLuint& out);
     void UseRenderShader(bool wbuffer);
     void SetupPolygon(RendererPolygon* rp, Polygon* polygon) const;
     u32* SetupVertex(const Polygon* poly, int vid, const Vertex* vtx, u32 vtxattr, u32 texlayer, u32* vptr) const;
@@ -99,6 +100,7 @@ private:
     GLuint ClearShaderBitmap {};
 
     GLuint RenderShader[2] {};
+    GLuint RenderShaderLines[2] {}; // identical copy used for GL_LINES only (see RenderSceneChunk)
     GLint RenderModeULoc = 0;
     GLint AlphaRefULoc = 0;
     GLuint CurShaderID = -1;
