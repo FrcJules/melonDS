@@ -17,6 +17,7 @@ layout(std140) uniform uConfig
 };
 
 uniform int uRenderMode; // 0=opaque 1=translucent 2=shadowmask
+uniform int uAlphaRef;   // DISP3DCNT alpha test (0 = off); like the software renderer: discard if alpha5 <= ref
 
 smooth in vec4 fColor;
 smooth in vec2 fTexcoord;
@@ -100,6 +101,7 @@ void main()
     else
     {
         vec4 col = FinalColor();
+        if (int(col.a * 31.0 + 0.5) <= uAlphaRef) discard;
         if (uRenderMode == 0)
         {
             // opaque pixels

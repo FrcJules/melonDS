@@ -87,11 +87,17 @@ bool GLRenderer3D::BuildRenderShader(bool wbuffer)
 void GLRenderer3D::UseRenderShader(bool wbuffer)
 {
     int flags = (int)wbuffer;
-    if (CurShaderID == flags) return;
-    glUseProgram(RenderShader[flags]);
-    CurShaderID = flags;
+    if (CurShaderID != flags)
+    {
+        glUseProgram(RenderShader[flags]);
+        CurShaderID = flags;
 
-    RenderModeULoc = glGetUniformLocation(RenderShader[flags], "uRenderMode");
+        RenderModeULoc = glGetUniformLocation(RenderShader[flags], "uRenderMode");
+        AlphaRefULoc = glGetUniformLocation(RenderShader[flags], "uAlphaRef");
+    }
+
+    // alpha test reference of the frame being rendered (the software renderer applies it, this one used to ignore it)
+    glUniform1i(AlphaRefULoc, GPU3D.RenderAlphaRef);
 }
 
 void SetupDefaultTexParams(GLuint tex)

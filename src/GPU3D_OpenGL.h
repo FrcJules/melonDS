@@ -100,6 +100,7 @@ private:
 
     GLuint RenderShader[2] {};
     GLint RenderModeULoc = 0;
+    GLint AlphaRefULoc = 0;
     GLuint CurShaderID = -1;
 
     GLuint FinalPassEdgeShader {};
