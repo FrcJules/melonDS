@@ -618,6 +618,11 @@ public:
     bool ScreensEnabled = false;
     bool ScreenSwap = false;
 
+    // frame skipping for slow hosts (software renderer only): skip the 3D polygon rasterisation of this frame.
+    // The 3D layer then keeps the previous image; 2D, capture and every game-visible state are unaffected.
+    bool Skip3D = false;
+    bool Redraw3D = false; // a 3D frame was skipped: the next one must be drawn even if the geometry is identical
+
     u16 VCount = 0;
     u16 TotalScanlines = 0;
     u16 DispStat[2] {};

@@ -1162,7 +1162,15 @@ void GPU::StartHBlank(u32 line) noexcept
     }
     else if (VCount == 215)
     {
-        Rend->Start3DRendering();
+        if (Skip3D)
+        {
+            Redraw3D = true;
+        }
+        else
+        {
+            if (Redraw3D) { GPU3D.RenderFrameIdentical = false; Redraw3D = false; }
+            Rend->Start3DRendering();
+        }
     }
     else if (VCount == 262)
     {
