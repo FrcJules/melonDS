@@ -105,7 +105,13 @@ endif()
 
 option(BUILD_QT_SDL "Build Qt/SDL frontend" ON)
 
+option(BUILD_BENCH "Build melonDS-bench, a headless benchmark tool" OFF)
+
 add_subdirectory(src)
+
+if (BUILD_BENCH)
+    add_subdirectory(tools/bench)
+endif()
 
 if (BUILD_QT_SDL)
     add_subdirectory(src/frontend/qt_sdl)
