@@ -448,6 +448,89 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
     u8 color;
     u32 lastxpos;
 
+    if constexpr (!mosaic)
+    {
+        // no mosaic: draw one tile (up to 8 pixels) at a time. The tile entry, palette and the whole
+        // tile row are read once per tile instead of once per pixel; same pixels as the generic loop below.
+        // Tile rows are 4 (16-color) or 8 (256-color) bytes and aligned to their size, and bgvrammask is
+        // 2^n-1, so masking the row address once is the same as masking every byte address.
+        const u32 tiley = yoff & 0x7;
+        const u32 bgflag = 0x01000000 << bgnum;
+        const u8 bgbit = 1 << bgnum;
+        u32 xpos = xoff;
+        int i = 0;
+
+        if (bgcnt & (1<<7))
+        {
+            // 256-color
+            while (i < 256)
+            {
+                curtile = *(u16*)&bgvram[(tilemapaddr + ((xpos & 0xF8) >> 2) + ((xpos & widexmask) << 3)) & bgvrammask];
+
+                if (extpal) curpal = GPU2D.GetBGExtPal(extpalslot, curtile>>12);
+                else        curpal = pal;
+
+                pixelsaddr = tilesetaddr + ((curtile & 0x03FF) << 6)
+                                         + (((curtile & (1<<11)) ? (7-tiley) : tiley) << 3);
+                u64 row = *(u64*)&bgvram[pixelsaddr & bgvrammask];
+                if (!row)
+                {
+                    // fully transparent tile row: nothing to draw
+                    int skip = 8 - (xpos & 0x7);
+                    i += skip; xpos += skip;
+                    continue;
+                }
+                u32 hflip = (curtile & (1<<10)) ? 7 : 0;
+
+                int end = i + 8 - (xpos & 0x7);
+                if (end > 256) end = 256;
+                for (; i < end; i++, xpos++)
+                {
+                    if (WindowMask[i] & bgbit)
+                    {
+                        color = (u8)(row >> (((xpos & 0x7) ^ hflip) << 3));
+                        if (color)
+                            DrawPixel(&BGOBJLine[i], curpal[color], bgflag);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // 16-color
+            while (i < 256)
+            {
+                curtile = *(u16*)&bgvram[(tilemapaddr + ((xpos & 0xF8) >> 2) + ((xpos & widexmask) << 3)) & bgvrammask];
+                curpal = pal + ((curtile & 0xF000) >> 8);
+
+                pixelsaddr = tilesetaddr + ((curtile & 0x03FF) << 5)
+                                         + (((curtile & (1<<11)) ? (7-tiley) : tiley) << 2);
+                u32 row = *(u32*)&bgvram[pixelsaddr & bgvrammask];
+                if (!row)
+                {
+                    // fully transparent tile row: nothing to draw
+                    int skip = 8 - (xpos & 0x7);
+                    i += skip; xpos += skip;
+                    continue;
+                }
+                u32 hflip = (curtile & (1<<10)) ? 7 : 0;
+
+                int end = i + 8 - (xpos & 0x7);
+                if (end > 256) end = 256;
+                for (; i < end; i++, xpos++)
+                {
+                    if (WindowMask[i] & bgbit)
+                    {
+                        color = (row >> (((xpos & 0x7) ^ hflip) << 2)) & 0xF;
+                        if (color)
+                            DrawPixel(&BGOBJLine[i], curpal[color], bgflag);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     if (bgcnt & (1<<7))
     {
         // 256-color
