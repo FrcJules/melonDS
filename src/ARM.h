@@ -252,7 +252,41 @@ public:
     void Execute();
 
     // all code accesses are forced nonseq 32bit
-    u32 CodeRead32(u32 addr, bool branch);
+    // defined here so that it inlines into the interpreter loop and JumpTo
+    static constexpr int kCodeCacheTiming = 3;//5;
+
+    u32 CodeRead32(u32 addr, bool branch)
+    {
+        /*if (branch || (!(addr & 0xFFF)))
+        {
+            if (!(PU_Map[addr>>12] & 0x04))
+            {
+                PrefetchAbort();
+                return 0;
+            }
+        }*/
+
+        if (addr < ITCMSize)
+        {
+            CodeCycles = 1;
+            return *(u32*)&ITCM[addr & (ITCMPhysicalSize - 1)];
+        }
+
+        CodeCycles = RegionCodeCycles;
+        if (CodeCycles == 0xFF) // cached memory. hax
+        {
+            if (branch || !(addr & 0x1F))
+                CodeCycles = kCodeCacheTiming;//ICacheLookup(addr);
+            else
+                CodeCycles = 1;
+
+            //return *(u32*)&CurICacheLine[addr & 0x1C];
+        }
+
+        if (CodeMem.Mem) return *(u32*)&CodeMem.Mem[addr & CodeMem.Mask];
+
+        return BusRead32(addr);
+    }
 
     void DataRead8(u32 addr, u32* val) override;
     void DataRead16(u32 addr, u32* val) override;

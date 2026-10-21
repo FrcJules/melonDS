@@ -36,7 +36,6 @@ using Platform::LogLevel;
 // a value of 1 would represent a perfect cache, but that causes
 // games to run too fast, causing a number of issues
 const int kDataCacheTiming = 3;//2;
-const int kCodeCacheTiming = 3;//5;
 
 
 void ARMv5::CP15Reset()
@@ -787,39 +786,6 @@ u32 ARMv5::CP15Read(u32 id) const
 // TCM are handled here.
 // TODO: later on, handle PU, and maybe caches
 
-u32 ARMv5::CodeRead32(u32 addr, bool branch)
-{
-    /*if (branch || (!(addr & 0xFFF)))
-    {
-        if (!(PU_Map[addr>>12] & 0x04))
-        {
-            PrefetchAbort();
-            return 0;
-        }
-    }*/
-
-    if (addr < ITCMSize)
-    {
-        CodeCycles = 1;
-        return *(u32*)&ITCM[addr & (ITCMPhysicalSize - 1)];
-    }
-
-    CodeCycles = RegionCodeCycles;
-    if (CodeCycles == 0xFF) // cached memory. hax
-    {
-        if (branch || !(addr & 0x1F))
-            CodeCycles = kCodeCacheTiming;//ICacheLookup(addr);
-        else
-            CodeCycles = 1;
-
-        //return *(u32*)&CurICacheLine[addr & 0x1C];
-    }
-
-    if (CodeMem.Mem) return *(u32*)&CodeMem.Mem[addr & CodeMem.Mask];
-
-    return BusRead32(addr);
-}
-
 
 void ARMv5::DataRead8(u32 addr, u32* val)
 {
@@ -983,6 +949,16 @@ void ARMv5::DataWrite8(u32 addr, u8 val)
         return;
     }
 
+#ifndef JIT_ENABLED
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses); no JIT block to invalidate here
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *(u8*)&NDS.MainRAM[addr & NDS.MainRAMMask] = val;
+        DataCycles = MemTimings[addr >> 12][1];
+        return;
+    }
+#endif
+
     BusWrite8(addr, val);
     DataCycles = MemTimings[addr >> 12][1];
 }
@@ -1012,6 +988,16 @@ void ARMv5::DataWrite16(u32 addr, u16 val)
         *(u16*)&DTCM[addr & (DTCMPhysicalSize - 1)] = val;
         return;
     }
+
+#ifndef JIT_ENABLED
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses); no JIT block to invalidate here
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *(u16*)&NDS.MainRAM[addr & NDS.MainRAMMask] = val;
+        DataCycles = MemTimings[addr >> 12][1];
+        return;
+    }
+#endif
 
     BusWrite16(addr, val);
     DataCycles = MemTimings[addr >> 12][1];
@@ -1043,6 +1029,16 @@ void ARMv5::DataWrite32(u32 addr, u32 val)
         return;
     }
 
+#ifndef JIT_ENABLED
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses); no JIT block to invalidate here
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *(u32*)&NDS.MainRAM[addr & NDS.MainRAMMask] = val;
+        DataCycles = MemTimings[addr >> 12][2];
+        return;
+    }
+#endif
+
     BusWrite32(addr, val);
     DataCycles = MemTimings[addr >> 12][2];
 }
@@ -1066,6 +1062,16 @@ void ARMv5::DataWrite32S(u32 addr, u32 val)
         *(u32*)&DTCM[addr & (DTCMPhysicalSize - 1)] = val;
         return;
     }
+
+#ifndef JIT_ENABLED
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses); no JIT block to invalidate here
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *(u32*)&NDS.MainRAM[addr & NDS.MainRAMMask] = val;
+        DataCycles += MemTimings[addr >> 12][3];
+        return;
+    }
+#endif
 
     BusWrite32(addr, val);
     DataCycles += MemTimings[addr >> 12][3];
