@@ -838,6 +838,14 @@ void ARMv5::DataRead8(u32 addr, u32* val)
         return;
     }
 
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses): skips the virtual bus call and the region switch
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *val = *(u8*)&NDS.MainRAM[addr & NDS.MainRAMMask];
+        DataCycles = MemTimings[addr >> 12][1];
+        return;
+    }
+
     *val = BusRead8(addr);
     DataCycles = MemTimings[addr >> 12][1];
 }
@@ -864,6 +872,14 @@ void ARMv5::DataRead16(u32 addr, u32* val)
     {
         DataCycles = 1;
         *val = *(u16*)&DTCM[addr & (DTCMPhysicalSize - 1)];
+        return;
+    }
+
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses): skips the virtual bus call and the region switch
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *val = *(u16*)&NDS.MainRAM[addr & NDS.MainRAMMask];
+        DataCycles = MemTimings[addr >> 12][1];
         return;
     }
 
@@ -896,6 +912,14 @@ void ARMv5::DataRead32(u32 addr, u32* val)
         return;
     }
 
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses): skips the virtual bus call and the region switch
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *val = *(u32*)&NDS.MainRAM[addr & NDS.MainRAMMask];
+        DataCycles = MemTimings[addr >> 12][2];
+        return;
+    }
+
     *val = BusRead32(addr);
     DataCycles = MemTimings[addr >> 12][2];
 }
@@ -914,6 +938,14 @@ void ARMv5::DataRead32S(u32 addr, u32* val)
     {
         DataCycles += 1;
         *val = *(u32*)&DTCM[addr & (DTCMPhysicalSize - 1)];
+        return;
+    }
+
+    // main RAM fast path (NDS mode: the DSi remaps a few addresses): skips the virtual bus call and the region switch
+    if ((addr & 0xFF000000) == 0x02000000 && NDS.ConsoleType == 0)
+    {
+        *val = *(u32*)&NDS.MainRAM[addr & NDS.MainRAMMask];
+        DataCycles += MemTimings[addr >> 12][3];
         return;
     }
 
