@@ -551,8 +551,9 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     for (int layer = 0; layer < 4; layer++)
     {
-        u16 mask = 0xDFBC;
-        if (layer < 2) mask |= (1 << 13);
+        // bit 13: extended palette slot (BG0/1) or display area overflow, i.e. wraparound (BG2/3):
+        // both end up in the layer config, so a change must rebuild it
+        u16 mask = 0xFFBC;
         if (bgcnt_diff[layer] & mask)
             layer_pre_dirty |= (1 << layer);
         if (bgcnt_diff[layer] & (~mask))
