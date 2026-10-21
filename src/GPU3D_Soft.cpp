@@ -424,88 +424,6 @@ bool DepthTest_LessThan_FrontFacing(s32 dstz, s32 z, u32 dstattr)
     return false;
 }
 
-// Same 4 rules as fnDepthTest in RenderPolygonScanline (0=LessThan, 1=LessThan_FrontFacing,
-// 2=Equal_Z, 3=Equal_W), picked once per polygon via a template argument instead of a function
-// pointer: lets the compiler inline the (tiny) comparison into FillOpaqueSpan's loop.
-template<int DepthMode>
-static inline bool TestDepthT(s32 dstz, s32 z, u32 dstattr)
-{
-    if constexpr (DepthMode == 0)
-    {
-        return z < dstz;
-    }
-    else if constexpr (DepthMode == 1)
-    {
-        if ((dstattr & 0x00400010) == 0x00000010) // opaque, back facing
-            return z <= dstz;
-        return z < dstz;
-    }
-    else if constexpr (DepthMode == 2)
-    {
-        s32 diff = dstz - z;
-        return (u32)(diff + 0x200) <= 0x400;
-    }
-    else // DepthMode == 3
-    {
-        s32 diff = dstz - z;
-        return (u32)(diff + 0xFF) <= 0x1FE;
-    }
-}
-
-// Exact incremental replacement for Interpolator<0>::Interpolate()'s "linear" branch
-// (y0 + (y1-y0)*relx/xdiff, or the symmetric y1 + (y0-y1)*(xdiff-relx)/xdiff form, both
-// truncating divisions), stepped one pixel (relx += 1) at a time without redividing:
-// two divisions to set up the whole span, then one add/compare per pixel.
-// Only valid where Interpolator<0>::linear is true (flat W across the span, see Setup());
-// correctness (not just speed) relies on relx increasing by exactly 1 between calls to Step().
-struct LinearStep
-{
-    s32 base;
-    s64 q, r, stepQ, stepR, D;
-    bool down; // true: tracks (xdiff - relx), which decreases as relx grows (the y0 > y1 case)
-
-    static LinearStep Make(s32 y0, s32 y1, s32 relx0, s32 xdiff)
-    {
-        LinearStep st{};
-        st.D = xdiff;
-        if (y0 < y1)
-        {
-            s64 N = (s64)y1 - y0;
-            s64 num = N * (s64)relx0;
-            st.q = num / st.D; st.r = num - st.q * st.D;
-            st.stepQ = N / st.D; st.stepR = N - st.stepQ * st.D;
-            st.base = y0;
-            st.down = false;
-        }
-        else // y0 > y1 (y0 == y1 is a constant span: the caller never calls Make() for it)
-        {
-            s64 N = (s64)y0 - y1;
-            s64 num = N * (s64)(xdiff - relx0);
-            st.q = num / st.D; st.r = num - st.q * st.D;
-            st.stepQ = N / st.D; st.stepR = N - st.stepQ * st.D;
-            st.base = y1;
-            st.down = true;
-        }
-        return st;
-    }
-
-    inline s32 Value() const { return base + (s32)q; }
-
-    inline void Step()
-    {
-        if (!down)
-        {
-            q += stepQ; r += stepR;
-            if (r >= D) { r -= D; q += 1; }
-        }
-        else
-        {
-            q -= stepQ; r -= stepR;
-            if (r < 0) { r += D; q -= 1; }
-        }
-    }
-};
-
 u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noexcept
 {
     u32 dstalpha = dstcolor >> 24;
@@ -658,92 +576,6 @@ SoftRenderer3D::RenderPixelFn SoftRenderer3D::PickRenderPixelFn(const Polygon* p
     else
         return toonOrHighlight ? &SoftRenderer3D::RenderPixel<false, true> : &SoftRenderer3D::RenderPixel<false, false>;
 }
-
-// See the declaration in GPU3D_Soft.h. Replaces, for the eligible span only, what
-// RenderPolygonScanline's general "part 2" loop does per pixel: a RenderPixel call (here the
-// color is known with no texture/toon lookup needed), the alpha test and translucent-blend
-// branch (always taken as "opaque" here since the caller only calls this when polyalpha == 31
-// and RenderAlphaRef < 31), and the anti-aliasing coverage/push-down block (never taken here
-// since the caller only calls this when AA is off for the frame). The depth-test-against-the-
-// pixel-underneath fallback is kept exactly as in the general path: it depends on *that pixel's*
-// stored edge flags (which an earlier, unrelated polygon may have set), not on this polygon's own
-// AA setting, so it cannot be skipped just because this polygon has AA off.
-template<int DepthMode>
-void SoftRenderer3D::FillOpaqueSpan(s32 y, s32 xbegin, s32 xendExcl, int edge, u32 polyattr,
-                                     s32 rl, s32 gl, s32 bl, s32 rr, s32 gr, s32 br, s32 zl, s32 zr,
-                                     s32 xstart, s32 xspan, bool linearSpan, Interpolator<0>& interpX)
-{
-    u32 attr = polyattr | edge;
-
-    bool rConst = (rl == rr), gConst = (gl == gr), bConst = (bl == br);
-    LinearStep rStep, gStep, bStep;
-    if (linearSpan)
-    {
-        s32 relx0 = xbegin - xstart;
-        if (!rConst) rStep = LinearStep::Make(rl, rr, relx0, xspan);
-        if (!gConst) gStep = LinearStep::Make(gl, gr, relx0, xspan);
-        if (!bConst) bStep = LinearStep::Make(bl, br, relx0, xspan);
-    }
-
-    for (s32 x = xbegin; x < xendExcl; x++)
-    {
-        u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
-        u32 dstattr = AttrBuffer[pixeladdr];
-
-        interpX.SetX(x);
-        s32 z = interpX.InterpolateZ(zl, zr);
-
-        if (!TestDepthT<DepthMode>(DepthBuffer[pixeladdr], z, dstattr))
-        {
-            if (!(dstattr & 0xF) || pixeladdr >= BufferSize)
-                goto next;
-
-            pixeladdr += BufferSize;
-            dstattr = AttrBuffer[pixeladdr];
-            if (!TestDepthT<DepthMode>(DepthBuffer[pixeladdr], z, dstattr))
-                goto next;
-        }
-
-        {
-            u32 vr, vg, vb;
-            if (linearSpan)
-            {
-                vr = (u32)(rConst ? rl : rStep.Value());
-                vg = (u32)(gConst ? gl : gStep.Value());
-                vb = (u32)(bConst ? bl : bStep.Value());
-            }
-            else
-            {
-                vr = (u32)interpX.Interpolate(rl, rr);
-                vg = (u32)interpX.Interpolate(gl, gr);
-                vb = (u32)interpX.Interpolate(bl, br);
-            }
-
-            // matches RenderPixel<false,false>'s "no texture" branch exactly: r/g/b are the
-            // u8-truncated (vr>>3) etc. (the implicit narrowing the general path gets for free by
-            // passing them as u8 parameters), not masked down any further
-            u32 color = ((vr>>3)&0xFF) | (((vg>>3)&0xFF) << 8) | (((vb>>3)&0xFF) << 16) | (31u << 24);
-
-            // grouped write: one pass over the 3 buffers, no AA coverage/push-down (excluded by
-            // the caller's eligibility check) and no per-pixel branch on alpha (always opaque here)
-            DepthBuffer[pixeladdr] = z;
-            ColorBuffer[pixeladdr] = color;
-            AttrBuffer[pixeladdr] = attr;
-        }
-
-next:
-        if (linearSpan)
-        {
-            if (!rConst) rStep.Step();
-            if (!gConst) gStep.Step();
-            if (!bConst) bStep.Step();
-        }
-    }
-}
-template void SoftRenderer3D::FillOpaqueSpan<0>(s32, s32, s32, int, u32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, bool, Interpolator<0>&);
-template void SoftRenderer3D::FillOpaqueSpan<1>(s32, s32, s32, int, u32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, bool, Interpolator<0>&);
-template void SoftRenderer3D::FillOpaqueSpan<2>(s32, s32, s32, int, u32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, bool, Interpolator<0>&);
-template void SoftRenderer3D::FillOpaqueSpan<3>(s32, s32, s32, int, u32, s32, s32, s32, s32, s32, s32, s32, s32, s32, s32, bool, Interpolator<0>&);
 
 void SoftRenderer3D::PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow)
 {
@@ -1130,36 +962,15 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
     bool wireframe = (polyalpha == 0);
 
     bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr);
-    int depthMode; // same choice as fnDepthTest, kept as an int so the "part 2" fast path can
-                   // pick a template instantiation (TestDepthT<N>) instead of a function pointer
     if (polygon->Attr & (1<<14))
-    {
         fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
-        depthMode = polygon->WBuffer ? 3 : 2;
-    }
     else if (polygon->FacingView)
-    {
         fnDepthTest = DepthTest_LessThan_FrontFacing;
-        depthMode = 1;
-    }
     else
-    {
         fnDepthTest = DepthTest_LessThan;
-        depthMode = 0;
-    }
 
     u32 blendmode = (polygon->Attr >> 4) & 0x3;
     RenderPixelFn fnRenderPixel = PickRenderPixelFn(polygon);
-
-    // "part 2" (the span between the edges) can skip RenderPixel/the alpha test/translucent
-    // blending/AA coverage entirely, and fill the buffers directly (see FillOpaqueSpan), when:
-    // the polygon has no texture and isn't toon/highlight (so color = vertex color, no lookup),
-    // is fully opaque (polyalpha == 31, so alpha is always 31 and never wireframe), AA is off for
-    // the frame, the alpha test can't reject an opaque pixel (RenderAlphaRef < 31), and it isn't a
-    // shadow polygon (stencil buffer handling is out of scope for this fast path).
-    bool hasTexture = (GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0);
-    bool fastOpaque = !hasTexture && (blendmode != 2) && (polyalpha == 31)
-        && !(GPU3D.RenderDispCnt & (1<<4)) && (GPU3D.RenderAlphaRef < 31) && !polygon->IsShadow;
 
     PrevIsShadowMask = false;
 
@@ -1302,10 +1113,6 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
     s32 x = xstart;
     Interpolator<0> interpX(xstart, xend+1, wl, wr, polygon->WBuffer);
-    // mirrors Interpolator<0>::Setup's own rule (dir=0, so mask=0x7F): used by FillOpaqueSpan to
-    // decide whether r/g/b can be stepped incrementally instead of re-divided per pixel.
-    s32 xspan = (xend+1) - xstart;
-    bool linearSpan = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
 
     if (x < 0) x = 0;
     s32 xlimit;
@@ -1419,18 +1226,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
     if (xlimit > xend+1) xlimit = xend+1;
     if (xlimit > 256) xlimit = 256;
 
-    if (fastOpaque)
-    {
-        switch (depthMode)
-        {
-        case 0: FillOpaqueSpan<0>(y, x, xlimit, edge, polyattr, rl,gl,bl, rr,gr,br, zl,zr, xstart, xspan, linearSpan, interpX); break;
-        case 1: FillOpaqueSpan<1>(y, x, xlimit, edge, polyattr, rl,gl,bl, rr,gr,br, zl,zr, xstart, xspan, linearSpan, interpX); break;
-        case 2: FillOpaqueSpan<2>(y, x, xlimit, edge, polyattr, rl,gl,bl, rr,gr,br, zl,zr, xstart, xspan, linearSpan, interpX); break;
-        default: FillOpaqueSpan<3>(y, x, xlimit, edge, polyattr, rl,gl,bl, rr,gr,br, zl,zr, xstart, xspan, linearSpan, interpX); break;
-        }
-        x = xlimit;
-    }
-    else if (wireframe && !edge) x = std::max(x, xlimit);
+    if (wireframe && !edge) x = std::max(x, xlimit);
     else
     for (; x < xlimit; x++)
     {

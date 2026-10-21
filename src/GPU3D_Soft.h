@@ -455,22 +455,6 @@ private:
     u32 RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const;
     using RenderPixelFn = u32 (SoftRenderer3D::*)(const Polygon*, u8, u8, u8, s16, s16, u32, u32, bool) const;
     RenderPixelFn PickRenderPixelFn(const Polygon* polygon) const;
-
-    // Fast path for "part 2" (the span between the edges) of RenderPolygonScanline, used when a
-    // whole polygon/scanline is known in advance to need none of: texture, toon/highlight,
-    // translucency (alpha test, blending), anti-aliasing, or the shadow stencil path (see
-    // RenderPolygonScanline's `fastOpaque` check). DepthMode is the same choice RenderPolygonScanline
-    // already makes once per polygon for fnDepthTest (0=LessThan, 1=LessThan_FrontFacing,
-    // 2=Equal_Z, 3=Equal_W) but picked at compile time here instead of through a function pointer.
-    // When the span is in the interpolator's "linear" mode (flat W, see Interpolator<0>::Setup),
-    // r/g/b are stepped incrementally (LinearStep, below) instead of re-dividing per pixel; Z still
-    // goes through the existing Interpolator (already division-free for Z-buffering, the common
-    // case - see NOTES-SERVEUR.md for why W-buffering's Z is not also made incremental here).
-    template<int DepthMode>
-    void FillOpaqueSpan(s32 y, s32 xbegin, s32 xendExcl, int edge, u32 polyattr,
-                         s32 rl, s32 gl, s32 bl, s32 rr, s32 gr, s32 br, s32 zl, s32 zr,
-                         s32 xstart, s32 xspan, bool linearSpan, Interpolator<0>& interpX);
-
     void PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
     void SetupPolygonLeftEdge(RendererPolygon* rp, s32 y) const;
     void SetupPolygonRightEdge(RendererPolygon* rp, s32 y) const;
