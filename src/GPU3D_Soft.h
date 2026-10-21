@@ -446,7 +446,15 @@ private:
 
     RendererPolygon PolygonList[2048];
     void TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const;
-    u32 RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const;
+    // HasTexture/ToonOrHighlight are per-polygon constants (texture format, blendmode==2):
+    // specialising on them at compile time removes two branches (and, for ToonOrHighlight,
+    // a toon-table lookup) from the per-pixel path instead of re-testing them for every pixel.
+    // blendmode/polyalpha/wireframe are still passed in: the caller already derived them once
+    // per polygon (RenderPolygonScanline), so this avoids re-decoding polygon->Attr per pixel too.
+    template<bool HasTexture, bool ToonOrHighlight>
+    u32 RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const;
+    using RenderPixelFn = u32 (SoftRenderer3D::*)(const Polygon*, u8, u8, u8, s16, s16, u32, u32, bool) const;
+    RenderPixelFn PickRenderPixelFn(const Polygon* polygon) const;
     void PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
     void SetupPolygonLeftEdge(RendererPolygon* rp, s32 y) const;
     void SetupPolygonRightEdge(RendererPolygon* rp, s32 y) const;

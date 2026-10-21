@@ -454,15 +454,12 @@ u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noex
     return srcR | (srcG << 8) | (srcB << 16) | (dstalpha << 24);
 }
 
-u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const
+template<bool HasTexture, bool ToonOrHighlight>
+u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const
 {
     u8 r, g, b, a;
 
-    u32 blendmode = (polygon->Attr >> 4) & 0x3;
-    u32 polyalpha = (polygon->Attr >> 16) & 0x1F;
-    bool wireframe = (polyalpha == 0);
-
-    if (blendmode == 2)
+    if constexpr (ToonOrHighlight)
     {
         if (GPU3D.RenderDispCnt & (1<<1))
         {
@@ -486,7 +483,7 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
         }
     }
 
-    if ((GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0))
+    if constexpr (HasTexture)
     {
         u8 tr, tg, tb;
 
@@ -539,27 +536,45 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
         a = polyalpha;
     }
 
-    if ((blendmode == 2) && (GPU3D.RenderDispCnt & (1<<1)))
+    if constexpr (ToonOrHighlight)
     {
-        u16 tooncolor = GPU3D.RenderToonTable[vr >> 1];
+        if (GPU3D.RenderDispCnt & (1<<1))
+        {
+            u16 tooncolor = GPU3D.RenderToonTable[vr >> 1];
 
-        vr = (tooncolor << 1) & 0x3E; if (vr) vr++;
-        vg = (tooncolor >> 4) & 0x3E; if (vg) vg++;
-        vb = (tooncolor >> 9) & 0x3E; if (vb) vb++;
+            u8 tvr = (tooncolor << 1) & 0x3E; if (tvr) tvr++;
+            u8 tvg = (tooncolor >> 4) & 0x3E; if (tvg) tvg++;
+            u8 tvb = (tooncolor >> 9) & 0x3E; if (tvb) tvb++;
 
-        r += vr;
-        g += vg;
-        b += vb;
+            r += tvr;
+            g += tvg;
+            b += tvb;
 
-        if (r > 63) r = 63;
-        if (g > 63) g = 63;
-        if (b > 63) b = 63;
+            if (r > 63) r = 63;
+            if (g > 63) g = 63;
+            if (b > 63) b = 63;
+        }
     }
 
     // checkme: can wireframe polygons use texture alpha?
     if (wireframe) a = 31;
 
     return r | (g << 8) | (b << 16) | (a << 24);
+}
+
+// picks, once per polygon, which of the 4 instantiations above to call for every pixel of it
+// (texture format and blendmode are polygon-constant; RenderDispCnt's texture-mapping master
+// toggle is frame-constant). Avoids re-testing "does this polygon have a texture" / "is this
+// toon or highlight" on every single pixel.
+SoftRenderer3D::RenderPixelFn SoftRenderer3D::PickRenderPixelFn(const Polygon* polygon) const
+{
+    bool hasTexture = (GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0);
+    bool toonOrHighlight = ((polygon->Attr >> 4) & 0x3) == 2;
+
+    if (hasTexture)
+        return toonOrHighlight ? &SoftRenderer3D::RenderPixel<true, true> : &SoftRenderer3D::RenderPixel<true, false>;
+    else
+        return toonOrHighlight ? &SoftRenderer3D::RenderPixel<false, true> : &SoftRenderer3D::RenderPixel<false, false>;
 }
 
 void SoftRenderer3D::PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow)
@@ -954,6 +969,9 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
     else
         fnDepthTest = DepthTest_LessThan;
 
+    u32 blendmode = (polygon->Attr >> 4) & 0x3;
+    RenderPixelFn fnRenderPixel = PickRenderPixelFn(polygon);
+
     PrevIsShadowMask = false;
 
     if (polygon->YTop != polygon->YBottom)
@@ -1154,7 +1172,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = (this->*fnRenderPixel)(polygon, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1250,7 +1268,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = (this->*fnRenderPixel)(polygon, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1342,7 +1360,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = (this->*fnRenderPixel)(polygon, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
         u8 alpha = color >> 24;
 
         // alpha test
