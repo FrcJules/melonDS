@@ -414,16 +414,15 @@ void A_LDM(ARM* cpu)
     if ((cpu->CurInstr & (1<<22)) && !(cpu->CurInstr & (1<<15)))
         cpu->UpdateMode(cpu->CPSR, (cpu->CPSR&~0x1F)|0x10, true);
 
-    for (int i = 0; i < 15; i++)
+    // only the registers in the list, lowest first (same order as testing bits 0-14)
+    for (u32 rlist = cpu->CurInstr & 0x7FFF; rlist; rlist &= (rlist - 1))
     {
-        if (cpu->CurInstr & (1<<i))
-        {
-            if (preinc) base += 4;
-            if (first) cpu->DataRead32 (base, &cpu->R[i]);
-            else       cpu->DataRead32S(base, &cpu->R[i]);
-            first = false;
-            if (!preinc) base += 4;
-        }
+        int i = __builtin_ctz(rlist);
+        if (preinc) base += 4;
+        if (first) cpu->DataRead32 (base, &cpu->R[i]);
+        else       cpu->DataRead32S(base, &cpu->R[i]);
+        first = false;
+        if (!preinc) base += 4;
     }
 
     u32 pc = 0;
@@ -496,26 +495,25 @@ void A_STM(ARM* cpu)
         cpu->UpdateMode(cpu->CPSR, (cpu->CPSR&~0x1F)|0x10, true);
     }
 
-    for (u32 i = 0; i < 16; i++)
+    // only the registers in the list, lowest first (same order as testing bits 0-15)
+    for (u32 rlist = cpu->CurInstr & 0xFFFF; rlist; rlist &= (rlist - 1))
     {
-        if (cpu->CurInstr & (1<<i))
+        u32 i = __builtin_ctz(rlist);
+        if (preinc) base += 4;
+
+        if (i == baseid && !isbanked)
         {
-            if (preinc) base += 4;
-
-            if (i == baseid && !isbanked)
-            {
-                if ((cpu->Num == 0) || (!(cpu->CurInstr & ((1<<i)-1))))
-                    first ? cpu->DataWrite32(base, oldbase) : cpu->DataWrite32S(base, oldbase);
-                else
-                    first ? cpu->DataWrite32(base, base) : cpu->DataWrite32S(base, base); // checkme
-            }
+            if ((cpu->Num == 0) || (!(cpu->CurInstr & ((1<<i)-1))))
+                first ? cpu->DataWrite32(base, oldbase) : cpu->DataWrite32S(base, oldbase);
             else
-                first ? cpu->DataWrite32(base, cpu->R[i]) : cpu->DataWrite32S(base, cpu->R[i]);
-
-            first = false;
-
-            if (!preinc) base += 4;
+                first ? cpu->DataWrite32(base, base) : cpu->DataWrite32S(base, base); // checkme
         }
+        else
+            first ? cpu->DataWrite32(base, cpu->R[i]) : cpu->DataWrite32S(base, cpu->R[i]);
+
+        first = false;
+
+        if (!preinc) base += 4;
     }
 
     if (cpu->CurInstr & (1<<22))
@@ -700,15 +698,14 @@ void T_PUSH(ARM* cpu)
     base -= (nregs<<2);
     cpu->R[13] = base;
 
-    for (int i = 0; i < 8; i++)
+    // only the registers in the list, lowest first (same order as testing bits 0-7)
+    for (u32 rlist = cpu->CurInstr & 0xFF; rlist; rlist &= (rlist - 1))
     {
-        if (cpu->CurInstr & (1<<i))
-        {
-            if (first) cpu->DataWrite32 (base, cpu->R[i]);
-            else       cpu->DataWrite32S(base, cpu->R[i]);
-            first = false;
-            base += 4;
-        }
+        int i = __builtin_ctz(rlist);
+        if (first) cpu->DataWrite32 (base, cpu->R[i]);
+        else       cpu->DataWrite32S(base, cpu->R[i]);
+        first = false;
+        base += 4;
     }
 
     if (cpu->CurInstr & (1<<8))
@@ -725,15 +722,14 @@ void T_POP(ARM* cpu)
     u32 base = cpu->R[13];
     bool first = true;
 
-    for (int i = 0; i < 8; i++)
+    // only the registers in the list, lowest first (same order as testing bits 0-7)
+    for (u32 rlist = cpu->CurInstr & 0xFF; rlist; rlist &= (rlist - 1))
     {
-        if (cpu->CurInstr & (1<<i))
-        {
-            if (first) cpu->DataRead32 (base, &cpu->R[i]);
-            else       cpu->DataRead32S(base, &cpu->R[i]);
-            first = false;
-            base += 4;
-        }
+        int i = __builtin_ctz(rlist);
+        if (first) cpu->DataRead32 (base, &cpu->R[i]);
+        else       cpu->DataRead32S(base, &cpu->R[i]);
+        first = false;
+        base += 4;
     }
 
     if (cpu->CurInstr & (1<<8))
@@ -755,15 +751,14 @@ void T_STMIA(ARM* cpu)
     u32 base = cpu->R[(cpu->CurInstr >> 8) & 0x7];
     bool first = true;
 
-    for (int i = 0; i < 8; i++)
+    // only the registers in the list, lowest first (same order as testing bits 0-7)
+    for (u32 rlist = cpu->CurInstr & 0xFF; rlist; rlist &= (rlist - 1))
     {
-        if (cpu->CurInstr & (1<<i))
-        {
-            if (first) cpu->DataWrite32 (base, cpu->R[i]);
-            else       cpu->DataWrite32S(base, cpu->R[i]);
-            first = false;
-            base += 4;
-        }
+        int i = __builtin_ctz(rlist);
+        if (first) cpu->DataWrite32 (base, cpu->R[i]);
+        else       cpu->DataWrite32S(base, cpu->R[i]);
+        first = false;
+        base += 4;
     }
 
     // TODO: check "Rb included in Rlist" case
@@ -776,15 +771,14 @@ void T_LDMIA(ARM* cpu)
     u32 base = cpu->R[(cpu->CurInstr >> 8) & 0x7];
     bool first = true;
 
-    for (int i = 0; i < 8; i++)
+    // only the registers in the list, lowest first (same order as testing bits 0-7)
+    for (u32 rlist = cpu->CurInstr & 0xFF; rlist; rlist &= (rlist - 1))
     {
-        if (cpu->CurInstr & (1<<i))
-        {
-            if (first) cpu->DataRead32 (base, &cpu->R[i]);
-            else       cpu->DataRead32S(base, &cpu->R[i]);
-            first = false;
-            base += 4;
-        }
+        int i = __builtin_ctz(rlist);
+        if (first) cpu->DataRead32 (base, &cpu->R[i]);
+        else       cpu->DataRead32S(base, &cpu->R[i]);
+        first = false;
+        base += 4;
     }
 
     if (!(cpu->CurInstr & (1<<((cpu->CurInstr >> 8) & 0x7))))
