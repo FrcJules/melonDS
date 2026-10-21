@@ -1278,6 +1278,51 @@ void ARMv5::BusWrite32(u32 addr, u32 val)
     NDS.ARM9Write32(addr, val);
 }
 
+// Instruction fetches of the ARM7 (interpreter prefetch and JumpTo). For the regions the ARM7
+// runs code from, this returns what NDS::ARM7Read16/32 returns, without the virtual call and
+// the full region switch; the DSi overrides those regions (NWRAM), so it keeps the generic path.
+u16 ARMv4::CodeRead16(u32 addr)
+{
+    if (NDS.ConsoleType == 0)
+    {
+        addr &= ~0x1;
+        switch (addr & 0xFF800000)
+        {
+        case 0x02000000:
+        case 0x02800000:
+            return *(u16*)&NDS.MainRAM[addr & NDS.MainRAMMask];
+        case 0x03000000:
+            if (NDS.SWRAM_ARM7.Mem)
+                return *(u16*)&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask];
+            return *(u16*)&NDS.ARM7WRAM[addr & (ARM7WRAMSize - 1)];
+        case 0x03800000:
+            return *(u16*)&NDS.ARM7WRAM[addr & (ARM7WRAMSize - 1)];
+        }
+    }
+    return BusRead16(addr);
+}
+
+u32 ARMv4::CodeRead32(u32 addr)
+{
+    if (NDS.ConsoleType == 0)
+    {
+        addr &= ~0x3;
+        switch (addr & 0xFF800000)
+        {
+        case 0x02000000:
+        case 0x02800000:
+            return *(u32*)&NDS.MainRAM[addr & NDS.MainRAMMask];
+        case 0x03000000:
+            if (NDS.SWRAM_ARM7.Mem)
+                return *(u32*)&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask];
+            return *(u32*)&NDS.ARM7WRAM[addr & (ARM7WRAMSize - 1)];
+        case 0x03800000:
+            return *(u32*)&NDS.ARM7WRAM[addr & (ARM7WRAMSize - 1)];
+        }
+    }
+    return BusRead32(addr);
+}
+
 u8 ARMv4::BusRead8(u32 addr)
 {
     return NDS.ARM7Read8(addr);

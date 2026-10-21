@@ -426,15 +426,10 @@ public:
     template <CPUExecuteMode mode>
     void Execute();
 
-    u16 CodeRead16(u32 addr)
-    {
-        return BusRead16(addr);
-    }
-
-    u32 CodeRead32(u32 addr)
-    {
-        return BusRead32(addr);
-    }
+    // same values as BusRead16/32, with the ARM7's usual code regions (main RAM, WRAM) read
+    // directly in DS mode instead of through NDS::ARM7Read16/32 (defined in ARM.cpp)
+    u16 CodeRead16(u32 addr);
+    u32 CodeRead32(u32 addr);
 
     void DataRead8(u32 addr, u32* val) override;
     void DataRead16(u32 addr, u32* val) override;
