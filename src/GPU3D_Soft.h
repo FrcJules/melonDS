@@ -451,10 +451,17 @@ private:
     // a toon-table lookup) from the per-pixel path instead of re-testing them for every pixel.
     // blendmode/polyalpha/wireframe are still passed in: the caller already derived them once
     // per polygon (RenderPolygonScanline), so this avoids re-decoding polygon->Attr per pixel too.
+    // texparam/texpal are the polygon's TexParam/TexPalette, read once per scanline by the caller
+    // (as locals, the texture decoding below can be hoisted out of the pixel loop by the compiler).
     template<bool HasTexture, bool ToonOrHighlight>
-    u32 RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const;
-    using RenderPixelFn = u32 (SoftRenderer3D::*)(const Polygon*, u8, u8, u8, s16, s16, u32, u32, bool) const;
-    RenderPixelFn PickRenderPixelFn(const Polygon* polygon) const;
+    u32 RenderPixel(u32 texparam, u32 texpal, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const;
+    // RenderPolygonScanline picks, once per polygon and scanline, the instantiation of this
+    // template matching the polygon's depth test and pixel kind: RenderPixel (and, for the common
+    // "less than" depth tests, the depth test) are then inlined in the three pixel loops instead of
+    // being called through pointers for every pixel.
+    template<int DepthMode, bool HasTexture, bool ToonOrHighlight>
+    void RenderPolygonScanlineT(RendererPolygon* rp, s32 y);
+    using RenderScanlineFn = void (SoftRenderer3D::*)(RendererPolygon*, s32);
     void PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
     void SetupPolygonLeftEdge(RendererPolygon* rp, s32 y) const;
     void SetupPolygonRightEdge(RendererPolygon* rp, s32 y) const;

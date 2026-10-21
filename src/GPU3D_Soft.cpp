@@ -24,6 +24,15 @@
 #include "NDS.h"
 #include "GPU.h"
 
+// for the small per-pixel helpers of the scanline loops (they are only called from there)
+#if defined(__GNUC__) || defined(__clang__)
+#define SOFT3D_INLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define SOFT3D_INLINE __forceinline
+#else
+#define SOFT3D_INLINE inline
+#endif
+
 namespace melonDS
 {
 
@@ -138,7 +147,7 @@ void SoftRenderer3D::SetThreaded(bool threaded) noexcept
     }
 }
 
-void SoftRenderer3D::TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const
+SOFT3D_INLINE void SoftRenderer3D::TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const
 {
     // TODO: consider using texture cache
     // however, I like the idea of having a "hardware accurate" path
@@ -424,6 +433,11 @@ bool DepthTest_LessThan_FrontFacing(s32 dstz, s32 z, u32 dstattr)
     return false;
 }
 
+// compile-time choice of the depth test (see RenderPolygonScanline). The two "less than" tests
+// cover nearly all polygons; the rarer "equal" tests (and toon/highlight polygons) go through
+// DepthMode_Dynamic, which calls the test through a pointer chosen once per polygon, as before.
+enum { DepthMode_LessThan_FrontFacing = 0, DepthMode_LessThan, DepthMode_Dynamic };
+
 u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noexcept
 {
     u32 dstalpha = dstcolor >> 24;
@@ -455,7 +469,7 @@ u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noex
 }
 
 template<bool HasTexture, bool ToonOrHighlight>
-u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const
+SOFT3D_INLINE u32 SoftRenderer3D::RenderPixel(u32 texparam, u32 texpal, u8 vr, u8 vg, u8 vb, s16 s, s16 t, u32 blendmode, u32 polyalpha, bool wireframe) const
 {
     u8 r, g, b, a;
 
@@ -488,7 +502,7 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
         u8 tr, tg, tb;
 
         u16 tcolor; u8 talpha;
-        TextureLookup(polygon->TexParam, polygon->TexPalette, s, t, &tcolor, &talpha);
+        TextureLookup(texparam, texpal, s, t, &tcolor, &talpha);
 
         tr = (tcolor << 1) & 0x3E; if (tr) tr++;
         tg = (tcolor >> 4) & 0x3E; if (tg) tg++;
@@ -560,21 +574,6 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
     if (wireframe) a = 31;
 
     return r | (g << 8) | (b << 16) | (a << 24);
-}
-
-// picks, once per polygon, which of the 4 instantiations above to call for every pixel of it
-// (texture format and blendmode are polygon-constant; RenderDispCnt's texture-mapping master
-// toggle is frame-constant). Avoids re-testing "does this polygon have a texture" / "is this
-// toon or highlight" on every single pixel.
-SoftRenderer3D::RenderPixelFn SoftRenderer3D::PickRenderPixelFn(const Polygon* polygon) const
-{
-    bool hasTexture = (GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0);
-    bool toonOrHighlight = ((polygon->Attr >> 4) & 0x3) == 2;
-
-    if (hasTexture)
-        return toonOrHighlight ? &SoftRenderer3D::RenderPixel<true, true> : &SoftRenderer3D::RenderPixel<true, false>;
-    else
-        return toonOrHighlight ? &SoftRenderer3D::RenderPixel<false, true> : &SoftRenderer3D::RenderPixel<false, false>;
 }
 
 void SoftRenderer3D::PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow)
@@ -953,6 +952,37 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
 
 void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 {
+    // 8 instantiations, indexed by [depth mode][has texture][toon or highlight]
+    static constexpr RenderScanlineFn fns[3][2][2] = {
+        {{&SoftRenderer3D::RenderPolygonScanlineT<DepthMode_LessThan_FrontFacing, false, false>, nullptr},
+         {&SoftRenderer3D::RenderPolygonScanlineT<DepthMode_LessThan_FrontFacing, true, false>, nullptr}},
+        {{&SoftRenderer3D::RenderPolygonScanlineT<DepthMode_LessThan, false, false>, nullptr},
+         {&SoftRenderer3D::RenderPolygonScanlineT<DepthMode_LessThan, true, false>, nullptr}},
+        {{&SoftRenderer3D::RenderPolygonScanlineT<DepthMode_Dynamic, false, false>, &SoftRenderer3D::RenderPolygonScanlineT<DepthMode_Dynamic, false, true>},
+         {&SoftRenderer3D::RenderPolygonScanlineT<DepthMode_Dynamic, true, false>, &SoftRenderer3D::RenderPolygonScanlineT<DepthMode_Dynamic, true, true>}},
+    };
+
+    const Polygon* polygon = rp->PolyData;
+
+    // texture format and blendmode are polygon-constant; RenderDispCnt's texture-mapping master
+    // toggle is frame-constant
+    bool hasTexture = (GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0);
+    bool toonOrHighlight = ((polygon->Attr >> 4) & 0x3) == 2;
+
+    int depthmode;
+    if ((polygon->Attr & (1<<14)) || toonOrHighlight)
+        depthmode = DepthMode_Dynamic;
+    else if (polygon->FacingView)
+        depthmode = DepthMode_LessThan_FrontFacing;
+    else
+        depthmode = DepthMode_LessThan;
+
+    (this->*fns[depthmode][hasTexture][toonOrHighlight])(rp, y);
+}
+
+template<int DepthMode, bool HasTexture, bool ToonOrHighlight>
+void SoftRenderer3D::RenderPolygonScanlineT(RendererPolygon* rp, s32 y)
+{
     Polygon* polygon = rp->PolyData;
 
     u32 polyattr = (polygon->Attr & 0x3F008000);
@@ -961,16 +991,26 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
     u32 polyalpha = (polygon->Attr >> 16) & 0x1F;
     bool wireframe = (polyalpha == 0);
 
-    bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr);
-    if (polygon->Attr & (1<<14))
-        fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
-    else if (polygon->FacingView)
-        fnDepthTest = DepthTest_LessThan_FrontFacing;
-    else
-        fnDepthTest = DepthTest_LessThan;
+    bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr) = nullptr;
+    if constexpr (DepthMode == DepthMode_Dynamic)
+    {
+        if (polygon->Attr & (1<<14))
+            fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
+        else if (polygon->FacingView)
+            fnDepthTest = DepthTest_LessThan_FrontFacing;
+        else
+            fnDepthTest = DepthTest_LessThan;
+    }
+    auto depthTest = [fnDepthTest](s32 dstz, s32 z, u32 dstattr) -> bool
+    {
+        if constexpr (DepthMode == DepthMode_LessThan_FrontFacing) return DepthTest_LessThan_FrontFacing(dstz, z, dstattr);
+        else if constexpr (DepthMode == DepthMode_LessThan) return DepthTest_LessThan(dstz, z, dstattr);
+        else return fnDepthTest(dstz, z, dstattr);
+    };
 
     u32 blendmode = (polygon->Attr >> 4) & 0x3;
-    RenderPixelFn fnRenderPixel = PickRenderPixelFn(polygon);
+    const u32 texparam = polygon->TexParam;
+    const u32 texpal = polygon->TexPalette;
 
     PrevIsShadowMask = false;
 
@@ -1155,13 +1195,13 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
         // if depth test against the topmost pixel fails, test
         // against the pixel underneath
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+        if (!depthTest(DepthBuffer[pixeladdr], z, dstattr))
         {
             if (!(dstattr & 0xF) || pixeladdr >= BufferSize) continue;
 
             pixeladdr += BufferSize;
             dstattr = AttrBuffer[pixeladdr];
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+            if (!depthTest(DepthBuffer[pixeladdr], z, dstattr))
                 continue;
         }
 
@@ -1172,7 +1212,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = (this->*fnRenderPixel)(polygon, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
+        u32 color = RenderPixel<HasTexture, ToonOrHighlight>(texparam, texpal, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1251,13 +1291,13 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
         // if depth test against the topmost pixel fails, test
         // against the pixel underneath
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+        if (!depthTest(DepthBuffer[pixeladdr], z, dstattr))
         {
             if (!(dstattr & 0xF) || pixeladdr >= BufferSize) continue;
 
             pixeladdr += BufferSize;
             dstattr = AttrBuffer[pixeladdr];
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+            if (!depthTest(DepthBuffer[pixeladdr], z, dstattr))
                 continue;
         }
 
@@ -1268,7 +1308,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = (this->*fnRenderPixel)(polygon, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
+        u32 color = RenderPixel<HasTexture, ToonOrHighlight>(texparam, texpal, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1343,13 +1383,13 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
         // if depth test against the topmost pixel fails, test
         // against the pixel underneath
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+        if (!depthTest(DepthBuffer[pixeladdr], z, dstattr))
         {
             if (!(dstattr & 0xF) || pixeladdr >= BufferSize) continue;
 
             pixeladdr += BufferSize;
             dstattr = AttrBuffer[pixeladdr];
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+            if (!depthTest(DepthBuffer[pixeladdr], z, dstattr))
                 continue;
         }
 
@@ -1360,7 +1400,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = (this->*fnRenderPixel)(polygon, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
+        u32 color = RenderPixel<HasTexture, ToonOrHighlight>(texparam, texpal, vr>>3, vg>>3, vb>>3, s, t, blendmode, polyalpha, wireframe);
         u8 alpha = color >> 24;
 
         // alpha test
