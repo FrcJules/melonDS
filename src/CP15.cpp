@@ -580,6 +580,12 @@ void ARMv5::CP15Write(u32 id, u32 val)
     case 0x670:
     case 0x671:
         char log_output[1024];
+        // some games rewrite the same region register every few frames (DMA/cache maintenance habit)
+        // without actually changing its value; UpdatePURegions(true) below re-walks all 8 regions and
+        // re-derives MemTimings for the entire 4 GB address space (measured: ~30M instructions per call,
+        // dominant cost in Pokemon Noire/Blanche's town map). Skip it when the write is a no-op.
+        if (PU_Region[(id >> 4) & 0xF] == val)
+            return;
         PU_Region[(id >> 4) & 0xF] = val;
 
         std::snprintf(log_output,
