@@ -821,6 +821,24 @@ void ClipSegment(Vertex* outbuf, Vertex* vin, Vertex* vout)
 template<int comp, bool attribs>
 int ClipAgainstPlane(const GPU3D& gpu, Vertex* vertices, int nverts, int clipstart)
 {
+    // fast path: no tested vertex outside this plane pair, the two passes below would copy
+    // the vertices back unchanged; only the color rounding at the end remains
+    int out = 0;
+    for (int i = clipstart; i < nverts; i++)
+        out |= (vertices[i].Position[comp] > vertices[i].Position[3]) | (vertices[i].Position[comp] < -vertices[i].Position[3]);
+    if (!out)
+    {
+        for (int i = 0; i < nverts; i++)
+        {
+            Vertex* vtx = &vertices[i];
+
+            vtx->Color[0] &= ~0xFFF; vtx->Color[0] += 0xFFF;
+            vtx->Color[1] &= ~0xFFF; vtx->Color[1] += 0xFFF;
+            vtx->Color[2] &= ~0xFFF; vtx->Color[2] += 0xFFF;
+        }
+        return nverts;
+    }
+
     Vertex temp[10];
     int prev, next;
     int c = clipstart;
