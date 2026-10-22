@@ -817,17 +817,14 @@ u64 NDS::NextTarget()
 {
     u64 minEvent = UINT64_MAX;
 
+    // scheduled events only (set bits of the mask), in the same order as before
     u32 mask = SchedListMask;
-    for (int i = 0; i < Event_MAX; i++)
+    while (mask)
     {
-        if (!mask) break;
-        if (mask & 0x1)
-        {
-            if (SchedList[i].Timestamp < minEvent)
-                minEvent = SchedList[i].Timestamp;
-        }
-
-        mask >>= 1;
+        int i = __builtin_ctz(mask);
+        mask &= mask - 1;
+        if (SchedList[i].Timestamp < minEvent)
+            minEvent = SchedList[i].Timestamp;
     }
 
     u64 max = SysTimestamp + kMaxIterationCycles;
@@ -842,24 +839,22 @@ void NDS::RunSystem(u64 timestamp)
 {
     SysTimestamp = timestamp;
 
+    // events that were scheduled on entry, in index order (an event function may schedule others:
+    // they are seen on the next call, as before)
     u32 mask = SchedListMask;
-    for (int i = 0; i < Event_MAX; i++)
+    while (mask)
     {
-        if (!mask) break;
-        if (mask & 0x1)
+        int i = __builtin_ctz(mask);
+        mask &= mask - 1;
+
+        SchedEvent& evt = SchedList[i];
+        if (evt.Timestamp <= SysTimestamp)
         {
-            SchedEvent& evt = SchedList[i];
+            SchedListMask &= ~(1<<i);
 
-            if (evt.Timestamp <= SysTimestamp)
-            {
-                SchedListMask &= ~(1<<i);
-
-                EventFunc func = evt.Funcs[evt.FuncID];
-                func(evt.That, evt.Param);
-            }
+            EventFunc func = evt.Funcs[evt.FuncID];
+            func(evt.That, evt.Param);
         }
-
-        mask >>= 1;
     }
 }
 
