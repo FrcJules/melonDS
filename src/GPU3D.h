@@ -100,6 +100,11 @@ public:
 
     s32 CyclesToRunFor() const noexcept;
     void Run() noexcept;
+    // false when Run() would only bring Timestamp up to date (same test as at the start of Run())
+    bool NeedsRun() const noexcept
+    {
+        return GeometryEnabled && !FlushRequest && !(CmdPIPE.IsEmpty() && !(GXStat & (1<<27)));
+    }
     void CheckFIFOIRQ() noexcept;
     void CheckFIFODMA() noexcept;
 

@@ -1003,7 +1003,11 @@ u32 NDS::RunFrame()
                 }
 
                 RunTimers(0);
-                GPU.GPU3D.Run();
+                // the geometry engine is idle most of the time: skip the call then
+                if (GPU.GPU3D.NeedsRun())
+                    GPU.GPU3D.Run();
+                else
+                    GPU.GPU3D.Timestamp = ARM9Timestamp >> ARM9ClockShift;
 
                 target = ARM9Timestamp >> ARM9ClockShift;
                 CurCPU = 1;
