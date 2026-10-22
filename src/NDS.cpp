@@ -1631,7 +1631,7 @@ void NDS::NocashPrint(u32 ncpu, u32 addr, bool appendNewline)
     Log(LogLevel::Debug, appendNewline ? "%s\n" : "%s", output);
 }
 
-void NDS::MonitorARM9Jump(u32 addr)
+void NDS::MonitorARM9JumpBoot(u32 addr)
 {
     // checkme: can the entrypoint addr be THUMB?
     // also TODO: make it work in DSi mode

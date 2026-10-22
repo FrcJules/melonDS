@@ -450,7 +450,9 @@ public: // TODO: Encapsulate the rest of these members
     u64 GetSysClockCycles(int num);
     void NocashPrint(u32 cpu, u32 addr, bool appendNewline = true);
 
-    void MonitorARM9Jump(u32 addr);
+    // only does something until the game's entry point is reached (inline check: called on every ARM9 jump)
+    void MonitorARM9Jump(u32 addr) { if (!RunningGame) MonitorARM9JumpBoot(addr); }
+    void MonitorARM9JumpBoot(u32 addr);
 
     virtual bool DMAsInMode(u32 cpu, u32 mode) const;
     virtual bool DMAsRunning(u32 cpu) const;
