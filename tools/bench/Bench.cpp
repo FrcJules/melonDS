@@ -38,6 +38,11 @@
 #include "Savestate.h"
 #include "xxhash/xxhash.h"
 
+#ifdef BENCH_NULLGL
+#include "GPU_OpenGL.h"
+#include "NullGL.h"
+#endif
+
 using namespace melonDS;
 
 namespace melonDS::Platform
@@ -68,6 +73,9 @@ struct Options
     bool FastMem = true;
     bool Threaded3D = false;
     bool AudioHash = false;
+    bool GL = false;           // --gl : OpenGL renderer on the null GL driver (BENCH_NULLGL builds)
+    int GLScale = 2;
+    std::string GLStatsPath;
     std::string StatePath;
     std::string SavePath;      // --sav : cartridge save data (raw .sav) loaded before the first frame
     std::string InputPath;
@@ -101,7 +109,14 @@ static void Usage()
         "  --frame-times FILE    write the time of every frame (frame,ms) as CSV\n"
         "  --audio-dump FILE     write the raw audio (stereo s16 little-endian) to FILE\n"
         "  --frame-hashes FILE   write a hash of every frame (frame,screens,audio so far) as CSV\n"
-        "  --json FILE           write the report to FILE instead of stdout\n");
+        "  --json FILE           write the report to FILE instead of stdout\n"
+#ifdef BENCH_NULLGL
+        "  --gl                  OpenGL renderer on a null GL driver (counts calls, draws nothing);\n"
+        "                        --frame-hashes then hashes the GL command stream instead of the screens\n"
+        "  --gl-scale N          OpenGL internal resolution (default 2, as in Cantaloup)\n"
+        "  --gl-stats FILE       GL calls per timed frame, by function, as CSV\n"
+#endif
+        );
 }
 
 static bool ParseFrameAction(const char* arg, std::vector<FrameAction>& out)
@@ -137,6 +152,11 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
         else if (arg == "--frame-hashes" && hasValue) opt.FrameHashesPath = argv[++i];
         else if (arg == "--audio-dump" && hasValue) opt.AudioDumpPath = argv[++i];
         else if (arg == "--audio-hash")             opt.AudioHash = true;
+#ifdef BENCH_NULLGL
+        else if (arg == "--gl")                     opt.GL = true;
+        else if (arg == "--gl-scale" && hasValue)   opt.GLScale = (int)strtol(argv[++i], nullptr, 10);
+        else if (arg == "--gl-stats" && hasValue)   opt.GLStatsPath = argv[++i];
+#endif
         else if (arg == "--shot" && hasValue)
         {
             if (!ParseFrameAction(argv[++i], opt.Shots)) return false;
@@ -387,6 +407,24 @@ int main(int argc, char** argv)
         nds->GetRenderer().SetRenderSettings(settings);
     }
 
+#ifdef BENCH_NULLGL
+    if (opt.GL)
+    {
+        // same setup as Cantaloup's ds_use_gl_renderer
+        NullGL::EnableHash(!opt.FrameHashesPath.empty());
+        nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
+        RendererSettings settings {};
+        settings.ScaleFactor = opt.GLScale;
+        settings.Threaded = false;
+        settings.HiresCoordinates = true;
+        settings.BetterPolygons = false;
+        nds->GetRenderer().SetRenderSettings(settings);
+        int current, count;
+        while (nds->GetRenderer().NeedsShaderCompile())
+            nds->GetRenderer().ShaderCompileStep(current, count);
+    }
+#endif
+
     // FreeBIOS and generated firmware cannot boot a firmware menu
     nds->SetupDirectBoot(opt.RomPath);
 
@@ -434,8 +472,21 @@ int main(int argc, char** argv)
     using Clock = std::chrono::steady_clock;
     double timedSeconds = 0;
 
+#ifdef BENCH_NULLGL
+    std::vector<u64> glCalls;
+    NullGL::Stats glTotal {};
+    u64 glMaxCalls = 0;
+#endif
+
     for (u32 frame = 0; frame < opt.Frames; frame++)
     {
+#ifdef BENCH_NULLGL
+        if (opt.GL)
+        {
+            NullGL::ResetCounters();
+            NullGL::ResetHash();
+        }
+#endif
         while (nextInput < inputs.size() && inputs[nextInput].Frame <= frame)
         {
             const InputEvent& ev = inputs[nextInput++];
@@ -466,6 +517,21 @@ int main(int argc, char** argv)
         {
             frameMs.push_back(ms);
             timedSeconds += ms / 1000.0;
+#ifdef BENCH_NULLGL
+            if (opt.GL)
+            {
+                const char* names[128];
+                u64 counts[128];
+                int n = NullGL::GetCounters(names, counts, 128);
+                if (glCalls.empty()) glCalls.resize(n);
+                for (int i = 0; i < n; i++) glCalls[i] += counts[i];
+                NullGL::Stats st = NullGL::GetStats();
+                glTotal.Calls += st.Calls;
+                glTotal.UploadBytes += st.UploadBytes;
+                glTotal.ReadPixels += st.ReadPixels;
+                glMaxCalls = std::max(glMaxCalls, st.Calls);
+            }
+#endif
         }
 
         // the SPU output buffer must be drained every frame
@@ -485,6 +551,16 @@ int main(int argc, char** argv)
                 audioPeak = std::max(audioPeak, abs((int)audioBuf[i]));
         }
 
+#ifdef BENCH_NULLGL
+        if (opt.GL && !opt.FrameHashesPath.empty())
+        {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%u,%016llx,%016llx\n", frame, (unsigned long long)NullGL::StreamHash(),
+                     (unsigned long long)XXH64_digest(audioState));
+            frameHashes += buf;
+        }
+        else
+#endif
         if (!opt.FrameHashesPath.empty() && ScreensToRGB(*nds, hashRgb))
         {
             char buf[80];
@@ -572,6 +648,29 @@ int main(int argc, char** argv)
     if (opt.AudioHash)
         add("  \"audio\": {\"samples\": %llu, \"peak\": %d, \"hash\": \"%016llx\"},\n",
             (unsigned long long)audioSamples, audioPeak, (unsigned long long)audioHash);
+#ifdef BENCH_NULLGL
+    if (opt.GL)
+    {
+        double nf = frameMs.empty() ? 1.0 : (double)frameMs.size();
+        add("  \"gl\": {\"scale\": %d, \"calls_per_frame\": %.1f, \"max_calls\": %llu, \"upload_bytes_per_frame\": %.0f, \"readpixels_per_frame\": %.3f},\n",
+            opt.GLScale, glTotal.Calls / nf, (unsigned long long)glMaxCalls, glTotal.UploadBytes / nf, glTotal.ReadPixels / nf);
+        if (!opt.GLStatsPath.empty())
+        {
+            const char* names[128];
+            u64 counts[128];
+            int n = NullGL::GetCounters(names, counts, 128);
+            std::string csv = "function,calls_per_frame\n";
+            for (int i = 0; i < n && i < (int)glCalls.size(); i++)
+            {
+                if (!glCalls[i]) continue;
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%s,%.2f\n", names[i], glCalls[i] / nf);
+                csv += buf;
+            }
+            WriteFile(opt.GLStatsPath, csv.data(), (u32)csv.size());
+        }
+    }
+#endif
     add("  \"shots\": [");
     for (size_t i = 0; i < shotResults.size(); i++)
         add("%s{\"frame\": %u, \"file\": \"%s\", \"hash\": \"%016llx\"}", i ? ", " : "",
