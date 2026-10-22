@@ -749,7 +749,7 @@ void GLRenderer2D::UpdateAndRender(int line)
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_STENCIL_TEST);
         glDisable(GL_BLEND);
-        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        OpenGL::ColorMaskAll(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_FALSE);
 
         glBindBufferBase(GL_UNIFORM_BUFFER, 20, LayerConfigUBO);
@@ -1578,7 +1578,7 @@ void GLRenderer2D::PrerenderSprites()
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_BLEND);
-    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    OpenGL::ColorMaskAll(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_FALSE);
 
     glBindBufferBase(GL_UNIFORM_BUFFER, 21, SpriteConfigUBO);
@@ -1657,6 +1657,12 @@ void GLRenderer2D::DoRenderSprites(int line)
 
     glClearColor(0, 0, 0, 0);
     glClearDepth(1);
+    if (!OpenGL::IndexedColorMask)
+    {
+        DoRenderSpritesNoIndexedMask(ystart, yend);
+        glDisable(GL_SCISSOR_TEST);
+        return;
+    }
     glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
@@ -1687,6 +1693,63 @@ void GLRenderer2D::DoRenderSprites(int line)
     RenderSprites(false, ystart, yend);
 
     glDisable(GL_SCISSOR_TEST);
+}
+
+// The passes of DoRenderSprites without per-attachment colour masks (OpenGL ES 3.0 / WebGL2 without
+// OES_draw_buffers_indexed), same output. Attachment 0 = sprite colour, 1 = flags (r blending, g mosaic, b OBJ window,
+// a BG priority). The two passes that write only the flags turn attachment 0 off with glDrawBuffers and keep the global
+// mask for attachment 1. The opaque pass writes colour and flags except b, which no global mask can express: it is drawn
+// before the OBJ window pass instead of after, with b written. That gives the same flags because
+// - its b output is always 0 (OBJ window sprites are not in this pass), the value b has before the OBJ window pass
+//   (cleared to 0, the mosaic pass does not write it);
+// - the OBJ window pass only writes b, without depth test or depth write: it does not depend on the opaque pass
+//   and the opaque pass does not depend on it.
+void GLRenderer2D::DoRenderSpritesNoIndexedMask(int ystart, int yend)
+{
+    static const GLenum both[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    static const GLenum flagsonly[2] = {GL_NONE, GL_COLOR_ATTACHMENT1};
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glDepthMask(GL_FALSE);
+
+    if (SpriteUseMosaic)
+    {
+        glUniform1i(SpriteRenderTransULoc, 1);
+        glDrawBuffers(2, flagsonly);
+        glColorMask(GL_FALSE, GL_TRUE, GL_FALSE, GL_TRUE);
+
+        RenderSprites(false, ystart, yend);
+
+        glDrawBuffers(2, both);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+
+    glUniform1i(SpriteRenderTransULoc, 0);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
+
+    RenderSprites(false, ystart, yend);
+
+    if (GPU2D.DispCnt & (1<<15)) // OBJ window enabled (RenderSprites(true) draws nothing otherwise)
+    {
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDrawBuffers(2, flagsonly);
+        glColorMask(GL_FALSE, GL_FALSE, GL_TRUE, GL_FALSE);
+
+        RenderSprites(true, ystart, yend);
+
+        // same state as at the end of DoRenderSprites
+        glDrawBuffers(2, both);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+    }
 }
 
 void GLRenderer2D::RenderSprites(bool window, int ystart, int yend)
@@ -1763,7 +1826,7 @@ void GLRenderer2D::RenderScreen(int ystart, int yend)
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_BLEND);
-    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    OpenGL::ColorMaskAll(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_FALSE);
 
     glViewport(0, 0, ScreenW, ScreenH);

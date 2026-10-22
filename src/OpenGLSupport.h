@@ -46,6 +46,21 @@ bool CompileVertexFragmentProgram(GLuint& result,
 
 bool CompileComputeProgram(GLuint& result, const std::string& source, const std::string& name);
 
+// Per-attachment colour masks (glColorMaski). Desktop OpenGL 3.0 always has them; OpenGL ES 3.0 / WebGL2 only with
+// the OES_draw_buffers_indexed extension. The frontend clears this flag before creating the renderer when the extension
+// is missing: the renderers then get the same output with glDrawBuffers (an attachment is written or not) and the
+// global glColorMask instead (see ColorMaskAll and the sites that write two attachments with different masks).
+extern bool IndexedColorMask;
+
+// Same mask on every attachment. With per-attachment masks only attachment 0 is set (the framebuffers drawn next have a
+// single attachment, or set the other masks themselves), as the renderers always did; without them the global mask
+// covers all the attachments, which is equivalent for those same reasons.
+inline void ColorMaskAll(GLboolean r, GLboolean g, GLboolean b, GLboolean a)
+{
+    if (IndexedColorMask) glColorMaski(0, r, g, b, a);
+    else                  glColorMask(r, g, b, a);
+}
+
 }
 
 #endif // OPENGLSUPPORT_H

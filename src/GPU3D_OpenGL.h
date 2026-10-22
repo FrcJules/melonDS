@@ -77,6 +77,8 @@ private:
 
     bool BuildRenderShader(bool wbuffer);
     bool BuildRenderShaderVariant(bool wbuffer, GLuint& out);
+    bool CompileMainProgram(GLuint& prog, const std::string& vs, std::string fs, const char* name,
+                            std::initializer_list<OpenGL::AttributeTarget> vertexIn) const;
     void UseRenderShader(bool wbuffer);
     void SetupPolygon(RendererPolygon* rp, Polygon* polygon) const;
     u32* SetupVertex(const Polygon* poly, int vid, const Vertex* vtx, u32 vtxattr, u32 texlayer, u32* vptr) const;
@@ -95,6 +97,7 @@ private:
         s64 DepthFunc, DepthMask, Blend, ActiveTexture, StencilMask, RenderMode;
         s64 StencilFunc[3], StencilOp[3];
         s64 ColorMask[2];
+        s64 GlobalColorMask, DrawBuffers; // without per-attachment colour masks (see CColorMasks)
         GLuint BoundTex[3];             // GL_TEXTURE_2D_ARRAY of texture units 0-2
         int NumWraps;
         GLuint WrapTex[32];             // wrap modes of the array textures used in this chunk
@@ -109,6 +112,8 @@ private:
     void CStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) const;
     void CStencilMask(GLuint writemask) const;
     void CColorMask(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a) const;
+    void CColorMasks(GLboolean r0, GLboolean g0, GLboolean b0, GLboolean a0,
+                     GLboolean r1, GLboolean g1, GLboolean b1, GLboolean a1) const;
     void CActiveTexture(GLenum unit) const;
     void CBindTex2DArray(GLuint tex) const;
     void CTexWrap(GLint s, GLint t) const;
@@ -189,6 +194,9 @@ private:
     int ScreenW {}, ScreenH {};
 
     GLuint ColorBufferTex {}, DepthBufferTex {}, AttrBufferTex {};
+    // without per-attachment colour masks only: copy of the attribute buffer on colour attachment 2, of which only
+    // B (fog flag) is used; the fog pass reads it instead of AttrBufferTex (see CColorMasks)
+    GLuint FogAttrBufferTex {};
 
     GLuint MainFramebuffer {};
 };

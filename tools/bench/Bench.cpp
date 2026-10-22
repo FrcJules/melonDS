@@ -75,6 +75,7 @@ struct Options
     bool AudioHash = false;
     bool GL = false;           // --gl : OpenGL renderer on the null GL driver (BENCH_NULLGL builds)
     int GLScale = 2;
+    bool GLNoIndexed = false;  // --gl-no-indexed : renderer path without per-attachment colour masks
     std::string GLStatsPath;
     std::string StatePath;
     std::string SavePath;      // --sav : cartridge save data (raw .sav) loaded before the first frame
@@ -114,6 +115,8 @@ static void Usage()
         "  --gl                  OpenGL renderer on a null GL driver (counts calls, draws nothing);\n"
         "                        --frame-hashes then hashes the GL command stream instead of the screens\n"
         "  --gl-scale N          OpenGL internal resolution (default 2, as in Cantaloup)\n"
+        "  --gl-no-indexed       renderer path without per-attachment colour masks (WebGL2 without\n"
+        "                        OES_draw_buffers_indexed)\n"
         "  --gl-stats FILE       GL calls per timed frame, by function, as CSV\n"
 #endif
         );
@@ -155,6 +158,7 @@ static bool ParseArgs(int argc, char** argv, Options& opt)
 #ifdef BENCH_NULLGL
         else if (arg == "--gl")                     opt.GL = true;
         else if (arg == "--gl-scale" && hasValue)   opt.GLScale = (int)strtol(argv[++i], nullptr, 10);
+        else if (arg == "--gl-no-indexed")          opt.GLNoIndexed = true;
         else if (arg == "--gl-stats" && hasValue)   opt.GLStatsPath = argv[++i];
 #endif
         else if (arg == "--shot" && hasValue)
@@ -412,6 +416,7 @@ int main(int argc, char** argv)
     {
         // same setup as Cantaloup's ds_use_gl_renderer
         NullGL::EnableHash(!opt.FrameHashesPath.empty());
+        OpenGL::IndexedColorMask = !opt.GLNoIndexed;
         nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
         RendererSettings settings {};
         settings.ScaleFactor = opt.GLScale;

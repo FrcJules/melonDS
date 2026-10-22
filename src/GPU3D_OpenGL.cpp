@@ -65,11 +65,10 @@ bool GLRenderer3D::BuildRenderShaderVariant(bool wbuffer, GLuint& out)
     }
 
     GLuint prog;
-    bool ret = OpenGL::CompileVertexFragmentProgram(prog,
+    bool ret = CompileMainProgram(prog,
         vsbuf, fsbuf,
         shadername,
-        {{"vPosition", 0}, {"vColor", 1}, {"vTexcoord", 2}, {"vPolygonAttr", 3}},
-        {{"oColor", 0}, {"oAttr", 1}});
+        {{"vPosition", 0}, {"vColor", 1}, {"vTexcoord", 2}, {"vPolygonAttr", 3}});
 
     if (!ret) return false;
 
@@ -88,6 +87,19 @@ bool GLRenderer3D::BuildRenderShaderVariant(bool wbuffer, GLuint& out)
     out = prog;
 
     return true;
+}
+
+// Programs that draw to the main framebuffer: colour (attachment 0) and attributes (1). Without per-attachment colour
+// masks they also write the attributes to attachment 2, for the fog flag (see CColorMasks).
+bool GLRenderer3D::CompileMainProgram(GLuint& prog, const std::string& vs, std::string fs, const char* name,
+                                      std::initializer_list<OpenGL::AttributeTarget> vertexIn) const
+{
+    if (OpenGL::IndexedColorMask)
+        return OpenGL::CompileVertexFragmentProgram(prog, vs, fs, name, vertexIn, {{"oColor", 0}, {"oAttr", 1}});
+
+    auto pos = fs.find('\n') + 1;
+    fs = fs.substr(0, pos) + "#define FogAttachment\n" + fs.substr(pos);
+    return OpenGL::CompileVertexFragmentProgram(prog, vs, fs, name, vertexIn, {{"oColor", 0}, {"oAttr", 1}, {"oFogAttr", 2}});
 }
 
 void GLRenderer3D::UseRenderShader(bool wbuffer)
@@ -139,11 +151,10 @@ bool GLRenderer3D::Init()
     glDepthRange(0, 1);
     glClearDepth(1.0);
 
-    if (!OpenGL::CompileVertexFragmentProgram(ClearShaderPlain,
+    if (!CompileMainProgram(ClearShaderPlain,
             k3DClearVS, k3DClearFS,
             "ClearShaderPlain",
-            {{"vPosition", 0}},
-            {{"oColor", 0}, {"oAttr", 1}}))
+            {{"vPosition", 0}}))
         return false;
 
     ClearUniformLoc[0] = glGetUniformLocation(ClearShaderPlain, "uColor");
@@ -151,11 +162,10 @@ bool GLRenderer3D::Init()
     ClearUniformLoc[2] = glGetUniformLocation(ClearShaderPlain, "uOpaquePolyID");
     ClearUniformLoc[3] = glGetUniformLocation(ClearShaderPlain, "uFogFlag");
 
-    if (!OpenGL::CompileVertexFragmentProgram(ClearShaderBitmap,
+    if (!CompileMainProgram(ClearShaderBitmap,
               k3DClearBitmapVS, k3DClearBitmapFS,
               "ClearShaderBitmap",
-              {{"vPosition", 0}},
-              {{"oColor", 0}, {"oAttr", 1}}))
+              {{"vPosition", 0}}))
         return false;
 
     ClearBitmapULoc[0] = glGetUniformLocation(ClearShaderBitmap, "uClearBitmapOffset");
@@ -293,6 +303,12 @@ bool GLRenderer3D::Init()
     glGenTextures(1, &AttrBufferTex);
     SetupDefaultTexParams(AttrBufferTex);
 
+    if (!OpenGL::IndexedColorMask)
+    {
+        glGenTextures(1, &FogAttrBufferTex);
+        SetupDefaultTexParams(FogAttrBufferTex);
+    }
+
     Parent.OutputTex3D = ColorBufferTex;
 
     glEnable(GL_BLEND);
@@ -313,6 +329,7 @@ GLRenderer3D::~GLRenderer3D()
     glDeleteTextures(1, &ColorBufferTex);
     glDeleteTextures(1, &DepthBufferTex);
     glDeleteTextures(1, &AttrBufferTex);
+    if (FogAttrBufferTex) glDeleteTextures(1, &FogAttrBufferTex);
 
     glDeleteVertexArrays(1, &VertexArrayID);
     glDeleteBuffers(1, &VertexBufferID);
@@ -376,7 +393,16 @@ void GLRenderer3D::SetRenderSettings(int scale, bool betterpolygons) noexcept
     glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, ColorBufferTex, 0);
     glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, DepthBufferTex, 0);
     glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, AttrBufferTex, 0);
-    glDrawBuffers(2, fbassign);
+    if (OpenGL::IndexedColorMask)
+        glDrawBuffers(2, fbassign);
+    else
+    {
+        glBindTexture(GL_TEXTURE_2D, FogAttrBufferTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, ScreenW, ScreenH, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, FogAttrBufferTex, 0);
+        GLenum fbassign3[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
+        glDrawBuffers(3, fbassign3);
+    }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -798,6 +824,7 @@ void GLRenderer3D::CacheReset() const
     Cache.DepthFunc = Cache.DepthMask = Cache.Blend = Cache.ActiveTexture = Cache.StencilMask = Cache.RenderMode = -1;
     for (int i = 0; i < 3; i++) Cache.StencilFunc[i] = Cache.StencilOp[i] = -1;
     Cache.ColorMask[0] = Cache.ColorMask[1] = -1;
+    Cache.GlobalColorMask = Cache.DrawBuffers = -1;
     for (int i = 0; i < 3; i++) Cache.BoundTex[i] = (GLuint)-1;
     Cache.NumWraps = 0;
 }
@@ -851,6 +878,53 @@ void GLRenderer3D::CColorMask(GLuint buf, GLboolean r, GLboolean g, GLboolean b,
     if (Cache.ColorMask[buf] == v) return;
     Cache.ColorMask[buf] = v;
     glColorMaski(buf, r, g, b, a);
+}
+
+// Colour masks of attachment 0 (colour) and 1 (attributes: R opaque polygon ID, G edge flag, B fog flag; GL_RGB, no A).
+// With per-attachment masks (OES_draw_buffers_indexed on ES / WebGL2): two glColorMaski, as before.
+// Without them: glDrawBuffers turns each attachment on or off, and the global mask is all or nothing. That covers every
+// mask the renderer uses, because colour is always written in full or not at all, R and G always together, and B
+// (fog flag, written alone by translucent polygons) gets its own attachment 2: the programs write the same attribute
+// value there (oFogAttr = oAttr), it is turned on exactly when the indexed path would write B, and the fog pass reads
+// its B. Blending applies per attachment with the same factors, so attachment 2's B gets the same values as B of
+// attachment 1 on the indexed path. B of attachment 1 then holds other values, but nothing reads it on this path.
+void GLRenderer3D::CColorMasks(GLboolean r0, GLboolean g0, GLboolean b0, GLboolean a0,
+                               GLboolean r1, GLboolean g1, GLboolean b1, GLboolean a1) const
+{
+    if (OpenGL::IndexedColorMask)
+    {
+        CColorMask(0, r0, g0, b0, a0);
+        CColorMask(1, r1, g1, b1, a1);
+        return;
+    }
+
+    assert(r0 == g0 && r0 == b0 && r0 == a0);
+    assert(r1 == g1);
+    int bufs = (r0 ? 1 : 0) | (r1 ? 2 : 0) | (b1 ? 4 : 0);
+    if (bufs == 0)
+    {
+        // nothing written: the global mask is enough, the draw buffers stay as they are
+        if (Cache.GlobalColorMask == 0) return;
+        Cache.GlobalColorMask = 0;
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        return;
+    }
+    if (Cache.GlobalColorMask != 1)
+    {
+        Cache.GlobalColorMask = 1;
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+    if (Cache.DrawBuffers != bufs)
+    {
+        Cache.DrawBuffers = bufs;
+        GLenum list[3] =
+        {
+            (bufs & 1) ? (GLenum)GL_COLOR_ATTACHMENT0 : (GLenum)GL_NONE,
+            (bufs & 2) ? (GLenum)GL_COLOR_ATTACHMENT1 : (GLenum)GL_NONE,
+            (bufs & 4) ? (GLenum)GL_COLOR_ATTACHMENT2 : (GLenum)GL_NONE,
+        };
+        glDrawBuffers(3, list);
+    }
 }
 
 void GLRenderer3D::CActiveTexture(GLenum unit) const
@@ -1050,7 +1124,11 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
     CRenderMode(RenderMode_Opaque);
     glLineWidth(1.0);
 
-    CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
+    if (OpenGL::IndexedColorMask)
+        CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE); // attachment 0 is still fully writable (RenderFrame)
+    else
+        CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                    GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
 
     CDepthFunc(GL_LESS);
     CDepthMask(GL_TRUE);
@@ -1165,8 +1243,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                     CRenderMode(RenderMode_ShadowMask);
 
                     CBlend(false);
-                    CColorMask(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    CColorMask(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    CColorMasks(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE,
+                                GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
                     CDepthMask(GL_FALSE);
 
                     // render where stencil is 0xFF
@@ -1195,8 +1273,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                         CRenderMode(RenderMode_Opaque);
 
                         CBlend(false);
-                        CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                        CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
+                        CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                                    GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
 
                         // set stencil to the polygon's ID
                         CStencilFunc(GL_ALWAYS, polyid, 0xFF);
@@ -1221,8 +1299,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                         if (polyid != clrpolyid) { i++; continue; }
 
                         CBlend(true);
-                        CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                        CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                        CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                                    GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                         // draw where shadow mask has previously been rendered (stencil=0xFE)
                         // when passing, set it to (polyID | 0x40)
@@ -1238,8 +1316,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                     }
                     else
                     {
-                        CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                        CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                        CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                                    GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                         // draw on either background (0xFF) or shadowmask (0xFE)
                         // when passing, set it to (polyID | 0x40)
@@ -1279,8 +1357,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                 CRenderMode(RenderMode_ShadowMask);
 
                 CBlend(false);
-                CColorMask(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                CColorMask(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                CColorMasks(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE,
+                            GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
                 CDepthMask(GL_FALSE);
 
                 // set stencil bit7 where the shadowmask z-fails
@@ -1307,8 +1385,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                     CRenderMode(RenderMode_Opaque);
 
                     CBlend(false);
-                    CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
+                    CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                                GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
 
                     // set stencil to polyID
                     CStencilFunc(GL_ALWAYS, polyid, 0xFF);
@@ -1329,8 +1407,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                 if (rp->PolyData->IsShadow)
                 {
                     CBlend(false);
-                    CColorMask(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    CColorMask(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    CColorMasks(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE,
+                                GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
                     CDepthMask(GL_FALSE);
 
                     // render where polyID matches (ignoring other bits)
@@ -1342,8 +1420,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                     RenderSinglePolygon(i);
 
                     CBlend(true);
-                    CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                    CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                                GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                     // render where bit7 is set (ie. shadow mask)
                     // set bit6 and replace polyID
@@ -1359,8 +1437,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                 else
                 {
                     CBlend(true);
-                    CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                    CColorMasks(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE,
+                                GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                     // render where polyID and bit6 do not match
                     // set bit6 and set polyID
@@ -1387,14 +1465,27 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
         // same for the attribute buffer (color attachment 1): it is detached too, even though its draw buffer is off
         glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 0, 0);
         glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, 0, 0);
+        if (!OpenGL::IndexedColorMask)
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, 0, 0); // the fog pass reads it
         {
             GLenum onlycolor[2] = {GL_COLOR_ATTACHMENT0, GL_NONE};
-            glDrawBuffers(2, onlycolor);
+            glDrawBuffers(2, onlycolor); // attachment 2 (if any) is GL_NONE too
         }
 #endif
 
-        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        if (OpenGL::IndexedColorMask)
+        {
+            glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        }
+        else
+        {
+#ifndef MELONDS_GLES
+            GLenum onlycolor[3] = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE};
+            glDrawBuffers(3, onlycolor);
+#endif
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        }
 
         glEnable(GL_BLEND);
         glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
@@ -1431,6 +1522,12 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
             glUseProgram(FinalPassFogShader);
 
+            if (!OpenGL::IndexedColorMask)
+            {
+                // the fog flags are in attachment 2's B (see CColorMasks); texture unit 1 is still the active one
+                glBindTexture(GL_TEXTURE_2D, FogAttrBufferTex);
+            }
+
             if (GPU3D.RenderDispCnt & (1<<6))
                 glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_CONSTANT_COLOR, GL_ONE_MINUS_SRC_ALPHA);
             else
@@ -1452,9 +1549,22 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 #ifdef MELONDS_GLES
         glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, DepthBufferTex, 0);
         glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, AttrBufferTex, 0);
+        if (OpenGL::IndexedColorMask)
         {
             GLenum both[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
             glDrawBuffers(2, both);
+        }
+        else
+        {
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, FogAttrBufferTex, 0);
+            GLenum all[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
+            glDrawBuffers(3, all);
+        }
+#else
+        if (!OpenGL::IndexedColorMask)
+        {
+            GLenum all[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
+            glDrawBuffers(3, all);
         }
 #endif
     }
@@ -1588,8 +1698,18 @@ void GLRenderer3D::RenderFrame()
     glViewport(0, 0, ScreenW, ScreenH);
 
     glDisable(GL_BLEND);
-    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (OpenGL::IndexedColorMask)
+    {
+        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+    else
+    {
+        // the clear writes the three attachments (CColorMasks may have left some of them off)
+        GLenum all[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
+        glDrawBuffers(3, all);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
     glDepthMask(GL_TRUE);
     glStencilMask(0xFF);
 

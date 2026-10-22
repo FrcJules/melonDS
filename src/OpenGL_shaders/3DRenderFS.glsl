@@ -29,6 +29,10 @@ smooth in float fZ;
 
 out vec4 oColor;
 out vec4 oAttr;
+#ifdef FogAttachment
+// without per-attachment colour masks the fog flag (oAttr.b) is also written to its own attachment (see GPU3D_OpenGL.cpp)
+out vec4 oFogAttr;
+#endif
 
 // 6-bit expansion of a 5-bit colour component, as the console and the software renderer do: (c << 1), plus 1 if non-zero
 ivec3 To6(ivec3 c5)
@@ -143,6 +147,10 @@ void main()
 
         oColor = col;
     }
+
+#ifdef FogAttachment
+    oFogAttr = oAttr;
+#endif
 
 #ifdef WBuffer
     gl_FragDepth = fZ;

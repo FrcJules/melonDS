@@ -10,6 +10,10 @@ smooth in vec2 fTexcoord;
 
 out vec4 oColor;
 out vec4 oAttr;
+#ifdef FogAttachment
+// without per-attachment colour masks the fog flag (oAttr.b) is also written to its own attachment (see GPU3D_OpenGL.cpp)
+out vec4 oFogAttr;
+#endif
 
 void main()
 {
@@ -25,4 +29,7 @@ void main()
     oAttr.b = float(depth >> 24);
     oAttr.a = 1.0;
     gl_FragDepth = fdepth;
+#ifdef FogAttachment
+    oFogAttr = oAttr;
+#endif
 }

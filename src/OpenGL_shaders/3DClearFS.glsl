@@ -6,6 +6,10 @@ uniform uint uFogFlag;
 
 out vec4 oColor;
 out vec4 oAttr;
+#ifdef FogAttachment
+// without per-attachment colour masks the fog flag (oAttr.b) is also written to its own attachment (see GPU3D_OpenGL.cpp)
+out vec4 oFogAttr;
+#endif
 
 void main()
 {
@@ -14,4 +18,7 @@ void main()
     oAttr.g = 0.0;
     oAttr.b = float(uFogFlag);
     oAttr.a = 1.0;
+#ifdef FogAttachment
+    oFogAttr = oAttr;
+#endif
 }

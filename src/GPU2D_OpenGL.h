@@ -221,6 +221,7 @@ private:
     void PrerenderLayer(int layer);
 
     void DoRenderSprites(int line);
+    void DoRenderSpritesNoIndexedMask(int ystart, int yend);
     void RenderSprites(bool window, int ystart, int yend);
 
     void RenderScreen(int ystart, int yend);

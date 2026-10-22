@@ -39,6 +39,8 @@ using Platform::LogLevel;
 namespace OpenGL
 {
 
+bool IndexedColorMask = true;
+
 struct ShaderCacheEntry
 {
     u32 Length;

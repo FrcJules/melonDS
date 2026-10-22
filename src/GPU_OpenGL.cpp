@@ -536,8 +536,13 @@ void GLRenderer::RenderScreen(int ystart, int yend)
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_BLEND);
-    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (OpenGL::IndexedColorMask)
+    {
+        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+    else
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_FALSE);
 
     glViewport(0, 0, ScreenW, ScreenH);
@@ -771,7 +776,7 @@ void GLRenderer::DoCapture(int ystart, int yend)
     glBindBuffer(GL_UNIFORM_BUFFER, CaptureConfigUBO);
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CaptureConfig), &CaptureConfig);
 
-    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    OpenGL::ColorMaskAll(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, inputA);
