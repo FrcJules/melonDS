@@ -87,6 +87,33 @@ private:
     int RenderPolygonEdgeBatch(int i) const;
     void RenderSceneChunk(int y, int h);
 
+    // GL state set while drawing the polygons (RenderSceneChunk): a call that would set a value that is
+    // already set is skipped. Fewer GL calls (each one is a JavaScript call in WebGL), same GL state at
+    // every draw. Every value is unknown again at the start of RenderSceneChunk, the only user.
+    struct StateCache
+    {
+        s64 DepthFunc, DepthMask, Blend, ActiveTexture, StencilMask, RenderMode;
+        s64 StencilFunc[3], StencilOp[3];
+        s64 ColorMask[2];
+        GLuint BoundTex[3];             // GL_TEXTURE_2D_ARRAY of texture units 0-2
+        int NumWraps;
+        GLuint WrapTex[32];             // wrap modes of the array textures used in this chunk
+        GLint WrapS[32], WrapT[32];
+    };
+    mutable StateCache Cache {};
+    void CacheReset() const;
+    void CDepthFunc(GLenum func) const;
+    void CDepthMask(GLboolean mask) const;
+    void CBlend(bool enable) const;
+    void CStencilFunc(GLenum func, GLint ref, GLuint mask) const;
+    void CStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) const;
+    void CStencilMask(GLuint writemask) const;
+    void CColorMask(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a) const;
+    void CActiveTexture(GLenum unit) const;
+    void CBindTex2DArray(GLuint tex) const;
+    void CTexWrap(GLint s, GLint t) const;
+    void CRenderMode(GLint mode) const;
+
 
     enum
     {

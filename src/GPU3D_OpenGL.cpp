@@ -793,6 +793,132 @@ void GLRenderer3D::BuildPolygons(GLRenderer3D::RendererPolygon* polygons, int np
     NumEdgeIndices = eidx - EdgeIndicesOffset;
 }
 
+void GLRenderer3D::CacheReset() const
+{
+    Cache.DepthFunc = Cache.DepthMask = Cache.Blend = Cache.ActiveTexture = Cache.StencilMask = Cache.RenderMode = -1;
+    for (int i = 0; i < 3; i++) Cache.StencilFunc[i] = Cache.StencilOp[i] = -1;
+    Cache.ColorMask[0] = Cache.ColorMask[1] = -1;
+    for (int i = 0; i < 3; i++) Cache.BoundTex[i] = (GLuint)-1;
+    Cache.NumWraps = 0;
+}
+
+void GLRenderer3D::CDepthFunc(GLenum func) const
+{
+    if (Cache.DepthFunc == func) return;
+    Cache.DepthFunc = func;
+    glDepthFunc(func);
+}
+
+void GLRenderer3D::CDepthMask(GLboolean mask) const
+{
+    if (Cache.DepthMask == mask) return;
+    Cache.DepthMask = mask;
+    glDepthMask(mask);
+}
+
+void GLRenderer3D::CBlend(bool enable) const
+{
+    if (Cache.Blend == (s64)enable) return;
+    Cache.Blend = enable;
+    if (enable) glEnable(GL_BLEND);
+    else        glDisable(GL_BLEND);
+}
+
+void GLRenderer3D::CStencilFunc(GLenum func, GLint ref, GLuint mask) const
+{
+    if (Cache.StencilFunc[0] == func && Cache.StencilFunc[1] == ref && Cache.StencilFunc[2] == mask) return;
+    Cache.StencilFunc[0] = func; Cache.StencilFunc[1] = ref; Cache.StencilFunc[2] = mask;
+    glStencilFunc(func, ref, mask);
+}
+
+void GLRenderer3D::CStencilOp(GLenum sfail, GLenum dpfail, GLenum dppass) const
+{
+    if (Cache.StencilOp[0] == sfail && Cache.StencilOp[1] == dpfail && Cache.StencilOp[2] == dppass) return;
+    Cache.StencilOp[0] = sfail; Cache.StencilOp[1] = dpfail; Cache.StencilOp[2] = dppass;
+    glStencilOp(sfail, dpfail, dppass);
+}
+
+void GLRenderer3D::CStencilMask(GLuint writemask) const
+{
+    if (Cache.StencilMask == writemask) return;
+    Cache.StencilMask = writemask;
+    glStencilMask(writemask);
+}
+
+void GLRenderer3D::CColorMask(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a) const
+{
+    s64 v = (r ? 1 : 0) | (g ? 2 : 0) | (b ? 4 : 0) | (a ? 8 : 0);
+    if (Cache.ColorMask[buf] == v) return;
+    Cache.ColorMask[buf] = v;
+    glColorMaski(buf, r, g, b, a);
+}
+
+void GLRenderer3D::CActiveTexture(GLenum unit) const
+{
+    if (Cache.ActiveTexture == unit) return;
+    Cache.ActiveTexture = unit;
+    glActiveTexture(unit);
+}
+
+// binds to GL_TEXTURE_2D_ARRAY of the active unit (which must have been set with CActiveTexture)
+void GLRenderer3D::CBindTex2DArray(GLuint tex) const
+{
+    int unit = (int)(Cache.ActiveTexture - GL_TEXTURE0);
+    if (unit >= 0 && unit < 3)
+    {
+        if (Cache.BoundTex[unit] == tex) return;
+        Cache.BoundTex[unit] = tex;
+    }
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+}
+
+// wrap modes of the GL_TEXTURE_2D_ARRAY bound to the active unit (both set with the functions above)
+void GLRenderer3D::CTexWrap(GLint s, GLint t) const
+{
+    int unit = (int)(Cache.ActiveTexture - GL_TEXTURE0);
+    GLuint tex = (unit >= 0 && unit < 3) ? Cache.BoundTex[unit] : (GLuint)-1;
+    int i = 0;
+    if (tex != (GLuint)-1)
+    {
+        while (i < Cache.NumWraps && Cache.WrapTex[i] != tex) i++;
+        if (i == Cache.NumWraps)
+        {
+            if (i < 32)
+            {
+                Cache.WrapTex[i] = tex;
+                Cache.WrapS[i] = Cache.WrapT[i] = -1;
+                Cache.NumWraps++;
+            }
+            else
+                tex = (GLuint)-1;   // no room left: not cached
+        }
+    }
+    if (tex == (GLuint)-1)
+    {
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, s);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, t);
+        return;
+    }
+    if (Cache.WrapS[i] != s)
+    {
+        Cache.WrapS[i] = s;
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, s);
+    }
+    if (Cache.WrapT[i] != t)
+    {
+        Cache.WrapT[i] = t;
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, t);
+    }
+}
+
+// uRenderMode of the main render program (RenderShader[flags], current outside of the lines pass)
+void GLRenderer3D::CRenderMode(GLint mode) const
+{
+    if (Cache.RenderMode == mode) return;
+    Cache.RenderMode = mode;
+    glUniform1i(RenderModeULoc, mode);
+}
+
 void GLRenderer3D::SetupPolygonTexture(const RendererPolygon* poly) const
 {
     bool iscap = (poly->TexID == (GLuint)-1 || poly->TexID == (GLuint)-2);
@@ -800,14 +926,14 @@ void GLRenderer3D::SetupPolygonTexture(const RendererPolygon* poly) const
     if (iscap)
     {
         if (poly->TexID == (GLuint)-1)
-            glActiveTexture(GL_TEXTURE1);
+            CActiveTexture(GL_TEXTURE1);
         else
-            glActiveTexture(GL_TEXTURE2);
+            CActiveTexture(GL_TEXTURE2);
     }
     else
     {
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D_ARRAY, poly->TexID);
+        CActiveTexture(GL_TEXTURE0);
+        CBindTex2DArray(poly->TexID);
 
         // no texture bound: nothing to sample, and WebGL has no default texture to set parameters on
         if (poly->TexID == 0)
@@ -826,8 +952,7 @@ void GLRenderer3D::SetupPolygonTexture(const RendererPolygon* poly) const
     else
         repeatT = GL_CLAMP_TO_EDGE;
 
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, repeatS);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, repeatT);
+    CTexWrap(repeatS, repeatT);
 }
 
 int GLRenderer3D::RenderSinglePolygon(int i) const
@@ -896,6 +1021,7 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 {
     bool flags = GPU3D.RenderPolygonRAM[0]->WBuffer;
     UseRenderShader(flags);
+    CacheReset();
 
     //if (h != 192) glScissor(0, y<<ScaleFactor, 256<<ScaleFactor, h<<ScaleFactor);
 
@@ -921,22 +1047,22 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
     // pass 1: opaque pixels
 
-    glUniform1i(RenderModeULoc, RenderMode_Opaque);
+    CRenderMode(RenderMode_Opaque);
     glLineWidth(1.0);
 
-    glColorMaski(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
+    CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
 
-    glDepthFunc(GL_LESS);
-    glDepthMask(GL_TRUE);
+    CDepthFunc(GL_LESS);
+    CDepthMask(GL_TRUE);
 
     glBindVertexArray(VertexArrayID);
 
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, Parent.CaptureOutput128Tex);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, Parent.CaptureOutput256Tex);
+    CActiveTexture(GL_TEXTURE1);
+    CBindTex2DArray(Parent.CaptureOutput128Tex);
+    CActiveTexture(GL_TEXTURE2);
+    CBindTex2DArray(Parent.CaptureOutput256Tex);
 
-    glActiveTexture(GL_TEXTURE0);
+    CActiveTexture(GL_TEXTURE0);
 
     // Opaque lines are drawn last, with their own copy of the render program. ANGLE/D3D11 on Intel drops every draw call
     // that follows a change of primitive type with the same program, which used to make all polygons (or all lines) vanish.
@@ -964,16 +1090,16 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
         if ((rp->PrimType == GL_LINES) != (lines == 1)) { i++; continue; }
 
         if (rp->PolyData->Attr & (1<<14))
-            glDepthFunc(GL_LEQUAL);
+            CDepthFunc(GL_LEQUAL);
         else
-            glDepthFunc(GL_LESS);
+            CDepthFunc(GL_LESS);
 
         u32 polyattr = rp->PolyData->Attr;
         u32 polyid = (polyattr >> 24) & 0x3F;
 
-        glStencilFunc(GL_ALWAYS, polyid, 0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-        glStencilMask(0xFF);
+        CStencilFunc(GL_ALWAYS, polyid, 0xFF);
+        CStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        CStencilMask(0xFF);
 
         i += RenderPolygonBatch(i);
     }
@@ -1009,7 +1135,7 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
         glDepthMask(GL_TRUE);
     }*/
 
-    glEnable(GL_BLEND);
+    CBlend(true);
     glBlendEquationSeparate(GL_FUNC_ADD, GL_MAX);
 
     if (GPU3D.RenderDispCnt & (1<<3))
@@ -1026,7 +1152,7 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
         if ((GPU3D.RenderClearAttr1 & 0x001F0000) == 0)
         {
-            glDisable(GL_BLEND);
+            CBlend(false);
 
             for (int i = 0; i < NumFinalPolys; )
             {
@@ -1036,19 +1162,19 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                 {
                     // draw actual shadow mask
 
-                    glUniform1i(RenderModeULoc, RenderMode_ShadowMask);
+                    CRenderMode(RenderMode_ShadowMask);
 
-                    glDisable(GL_BLEND);
-                    glColorMaski(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    glDepthMask(GL_FALSE);
+                    CBlend(false);
+                    CColorMask(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    CColorMask(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    CDepthMask(GL_FALSE);
 
                     // render where stencil is 0xFF
                     // set to 0xFE where this polygon z-fails
-                    glDepthFunc(GL_LESS);
-                    glStencilFunc(GL_EQUAL, 0xFF, 0xFF);
-                    glStencilOp(GL_KEEP, GL_INVERT, GL_KEEP);
-                    glStencilMask(0x01);
+                    CDepthFunc(GL_LESS);
+                    CStencilFunc(GL_EQUAL, 0xFF, 0xFF);
+                    CStencilOp(GL_KEEP, GL_INVERT, GL_KEEP);
+                    CStencilMask(0x01);
 
                     i += RenderPolygonBatch(i);
                 }
@@ -1060,29 +1186,29 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                     u32 polyid = (polyattr >> 24) & 0x3F;
 
                     if (polyattr & (1<<14))
-                        glDepthFunc(GL_LEQUAL);
+                        CDepthFunc(GL_LEQUAL);
                     else
-                        glDepthFunc(GL_LESS);
+                        CDepthFunc(GL_LESS);
 
                     if (needopaque)
                     {
-                        glUniform1i(RenderModeULoc, RenderMode_Opaque);
+                        CRenderMode(RenderMode_Opaque);
 
-                        glDisable(GL_BLEND);
-                        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                        glColorMaski(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
+                        CBlend(false);
+                        CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                        CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
 
                         // set stencil to the polygon's ID
-                        glStencilFunc(GL_ALWAYS, polyid, 0xFF);
-                        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-                        glStencilMask(0xFF);
+                        CStencilFunc(GL_ALWAYS, polyid, 0xFF);
+                        CStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+                        CStencilMask(0xFF);
 
-                        glDepthMask(GL_TRUE);
+                        CDepthMask(GL_TRUE);
 
                         RenderSinglePolygon(i);
                     }
 
-                    glUniform1i(RenderModeULoc, RenderMode_Translucent);
+                    CRenderMode(RenderMode_Translucent);
 
                     GLboolean transfog;
                     if (!(polyattr & (1<<15))) transfog = fogenable;
@@ -1094,35 +1220,35 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                         u32 clrpolyid = (GPU3D.RenderClearAttr1 >> 24) & 0x3F;
                         if (polyid != clrpolyid) { i++; continue; }
 
-                        glEnable(GL_BLEND);
-                        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                        glColorMaski(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                        CBlend(true);
+                        CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                        CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                         // draw where shadow mask has previously been rendered (stencil=0xFE)
                         // when passing, set it to (polyID | 0x40)
                         // TODO might break bit0 of polyID
-                        glStencilFunc(GL_EQUAL, 0xFE, 0xFF);
-                        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
-                        glStencilMask(~(0x40|polyid)); // heheh
+                        CStencilFunc(GL_EQUAL, 0xFE, 0xFF);
+                        CStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+                        CStencilMask(~(0x40|polyid)); // heheh
 
-                        if (polyattr & (1<<11)) glDepthMask(GL_TRUE);
-                        else                    glDepthMask(GL_FALSE);
+                        if (polyattr & (1<<11)) CDepthMask(GL_TRUE);
+                        else                    CDepthMask(GL_FALSE);
 
                         i += needopaque ? RenderSinglePolygon(i) : RenderPolygonBatch(i);
                     }
                     else
                     {
-                        glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                        glColorMaski(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                        CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                        CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                         // draw on either background (0xFF) or shadowmask (0xFE)
                         // when passing, set it to (polyID | 0x40)
-                        glStencilFunc(GL_EQUAL, 0xFF, 0xFE);
-                        glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
-                        glStencilMask(~(0x40|polyid)); // heheh
+                        CStencilFunc(GL_EQUAL, 0xFF, 0xFE);
+                        CStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+                        CStencilMask(~(0x40|polyid)); // heheh
 
-                        if (polyattr & (1<<11)) glDepthMask(GL_TRUE);
-                        else                    glDepthMask(GL_FALSE);
+                        if (polyattr & (1<<11)) CDepthMask(GL_TRUE);
+                        else                    CDepthMask(GL_FALSE);
 
                         i += needopaque ? RenderSinglePolygon(i) : RenderPolygonBatch(i);
                     }
@@ -1131,8 +1257,8 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                     i++;
             }
 
-            glEnable(GL_BLEND);
-            glStencilMask(0xFF);
+            CBlend(true);
+            CStencilMask(0xFF);
         }
 
         // pass 3: translucent pixels
@@ -1145,22 +1271,22 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
             {
                 // clear shadow bits in stencil buffer
 
-                glStencilMask(0x80);
+                CStencilMask(0x80);
                 glClear(GL_STENCIL_BUFFER_BIT);
 
                 // draw actual shadow mask
 
-                glUniform1i(RenderModeULoc, RenderMode_ShadowMask);
+                CRenderMode(RenderMode_ShadowMask);
 
-                glDisable(GL_BLEND);
-                glColorMaski(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                glDepthMask(GL_FALSE);
+                CBlend(false);
+                CColorMask(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                CColorMask(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                CDepthMask(GL_FALSE);
 
                 // set stencil bit7 where the shadowmask z-fails
-                glDepthFunc(GL_LESS);
-                glStencilFunc(GL_ALWAYS, 0x80, 0x80);
-                glStencilOp(GL_KEEP, GL_REPLACE, GL_KEEP);
+                CDepthFunc(GL_LESS);
+                CStencilFunc(GL_ALWAYS, 0x80, 0x80);
+                CStencilOp(GL_KEEP, GL_REPLACE, GL_KEEP);
 
                 i += RenderPolygonBatch(i);
             }
@@ -1172,29 +1298,29 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
                 u32 polyid = (polyattr >> 24) & 0x3F;
 
                 if (polyattr & (1<<14))
-                    glDepthFunc(GL_LEQUAL);
+                    CDepthFunc(GL_LEQUAL);
                 else
-                    glDepthFunc(GL_LESS);
+                    CDepthFunc(GL_LESS);
 
                 if (needopaque)
                 {
-                    glUniform1i(RenderModeULoc, RenderMode_Opaque);
+                    CRenderMode(RenderMode_Opaque);
 
-                    glDisable(GL_BLEND);
-                    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    glColorMaski(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
+                    CBlend(false);
+                    CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                    CColorMask(1, GL_TRUE, GL_TRUE, fogenable, GL_FALSE);
 
                     // set stencil to polyID
-                    glStencilFunc(GL_ALWAYS, polyid, 0xFF);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-                    glStencilMask(0xFF);
+                    CStencilFunc(GL_ALWAYS, polyid, 0xFF);
+                    CStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+                    CStencilMask(0xFF);
 
-                    glDepthMask(GL_TRUE);
+                    CDepthMask(GL_TRUE);
 
                     RenderSinglePolygon(i);
                 }
 
-                glUniform1i(RenderModeULoc, RenderMode_Translucent);
+                CRenderMode(RenderMode_Translucent);
 
                 GLboolean transfog;
                 if (!(polyattr & (1<<15))) transfog = fogenable;
@@ -1202,48 +1328,48 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
                 if (rp->PolyData->IsShadow)
                 {
-                    glDisable(GL_BLEND);
-                    glColorMaski(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-                    glDepthMask(GL_FALSE);
+                    CBlend(false);
+                    CColorMask(0, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    CColorMask(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                    CDepthMask(GL_FALSE);
 
                     // render where polyID matches (ignoring other bits)
                     // clear bit7 where it passes
-                    glStencilFunc(GL_EQUAL, polyid, 0x3F);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
-                    glStencilMask(0x80);
+                    CStencilFunc(GL_EQUAL, polyid, 0x3F);
+                    CStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+                    CStencilMask(0x80);
 
                     RenderSinglePolygon(i);
 
-                    glEnable(GL_BLEND);
-                    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    glColorMaski(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                    CBlend(true);
+                    CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                    CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                     // render where bit7 is set (ie. shadow mask)
                     // set bit6 and replace polyID
-                    glStencilFunc(GL_EQUAL, 0xC0|polyid, 0x80);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-                    glStencilMask(0x7F);
+                    CStencilFunc(GL_EQUAL, 0xC0|polyid, 0x80);
+                    CStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+                    CStencilMask(0x7F);
 
-                    if (polyattr & (1<<11)) glDepthMask(GL_TRUE);
-                    else                    glDepthMask(GL_FALSE);
+                    if (polyattr & (1<<11)) CDepthMask(GL_TRUE);
+                    else                    CDepthMask(GL_FALSE);
 
                     i += RenderSinglePolygon(i);
                 }
                 else
                 {
-                    glEnable(GL_BLEND);
-                    glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                    glColorMaski(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
+                    CBlend(true);
+                    CColorMask(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                    CColorMask(1, GL_FALSE, GL_FALSE, transfog, GL_FALSE);
 
                     // render where polyID and bit6 do not match
                     // set bit6 and set polyID
-                    glStencilFunc(GL_NOTEQUAL, 0x40|polyid, 0x7F);
-                    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-                    glStencilMask(0x7F);
+                    CStencilFunc(GL_NOTEQUAL, 0x40|polyid, 0x7F);
+                    CStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+                    CStencilMask(0x7F);
 
-                    if (polyattr & (1<<11)) glDepthMask(GL_TRUE);
-                    else                    glDepthMask(GL_FALSE);
+                    if (polyattr & (1<<11)) CDepthMask(GL_TRUE);
+                    else                    CDepthMask(GL_FALSE);
 
                     i += needopaque ? RenderSinglePolygon(i) : RenderPolygonBatch(i);
                 }
