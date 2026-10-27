@@ -782,7 +782,9 @@ int main(int argc, char** argv)
             if (SDL_GetQueuedAudioSize(audio) == 0) audioUnderruns++;
             double queuedMs = SDL_GetQueuedAudioSize(audio) / 4.0 * 1000.0 / audioRate;
             double err = std::clamp((queuedMs - 100.0) / 100.0, -1.0, 1.0);
-            nds->SPU.SetOutputSkew(1.0029 + 0.004 * err);
+            // queue too full: drop a little audio (+0.4% at most); queue running dry (emulation slower than real time):
+            // stretch the audio instead of letting it underrun (pitch drops a little, no crackling)
+            nds->SPU.SetOutputSkew(std::max(1.0029 + (err >= 0 ? 0.004 * err : 0.5 * err), 0.7));
         }
         for (;;)
         {
