@@ -30,6 +30,10 @@
 
 #include <unordered_map>
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 namespace melonDS
 {
 class ARMJIT;
@@ -271,9 +275,12 @@ public:
     bool IrregularCycles = false;
 
 #ifdef __SWITCH__
-    void* JitRWBase;
-    void* JitRWStart;
-    void* JitRXStart;
+    Jit JitObj {};
+    bool JitIsWritable = true;
+public:
+    // the RW and RX views of the code are different mappings, only one is usable at a time
+    void SetJitWritable(bool writable);
+private:
 #endif
     void* CodeMemBase;
 

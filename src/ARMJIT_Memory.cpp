@@ -17,7 +17,8 @@
 */
 
 #if defined(__SWITCH__)
-#include <switch.h>
+#include <stdlib.h>
+#include <string.h>
 #elif defined(_WIN32)
 #include <windows.h>
 #else
@@ -116,47 +117,7 @@ using Platform::LogLevel;
 #endif
 
 #if defined(__SWITCH__)
-// with LTO the symbols seem to be not properly overriden
-// if they're somewhere else
-
-void HandleFault(u64 pc, u64 lr, u64 fp, u64 faultAddr, u32 desc);
-
-extern "C"
-{
-
-void ARM_RestoreContext(u64* registers) __attribute__((noreturn));
-
-extern char __start__;
-extern char __rodata_start;
-
-alignas(16) u8 __nx_exception_stack[0x8000];
-u64 __nx_exception_stack_size = 0x8000;
-
-void __libnx_exception_handler(ThreadExceptionDump* ctx)
-{
-    ARMJIT_Memory::FaultDescription desc;
-    u8* curArea = (u8*)(NDS::CurCPU == 0 ? ARMJIT_Memory::FastMem9Start : ARMJIT_Memory::FastMem7Start);
-    desc.EmulatedFaultAddr = (u8*)ctx->far.x - curArea;
-    desc.FaultPC = (u8*)ctx->pc.x;
-
-    u64 integerRegisters[33];
-    memcpy(integerRegisters, &ctx->cpu_gprs[0].x, 8*29);
-    integerRegisters[29] = ctx->fp.x;
-    integerRegisters[30] = ctx->lr.x;
-    integerRegisters[31] = ctx->sp.x;
-    integerRegisters[32] = ctx->pc.x;
-
-    if (Melon::FaultHandler(desc))
-    {
-        integerRegisters[32] = (u64)desc.FaultPC;
-
-        ARM_RestoreContext(integerRegisters);
-    }
-
-    HandleFault(ctx->pc.x, ctx->lr.x, ctx->fp.x, ctx->far.x, ctx->error_desc);
-}
-
-}
+// no fault handler: fast memory is not supported on the Switch, every access takes the slow path
 
 #elif defined(_WIN32)
 
@@ -289,9 +250,8 @@ bool ARMJIT_Memory::MapIntoRange(u32 addr, u32 num, u32 offset, u32 size) noexce
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #ifdef __SWITCH__
-    Result r = (svcMapProcessMemory(dst, envGetOwnProcessHandle(),
-        (u64)(MemoryBaseCodeMem + offset), size));
-    return R_SUCCEEDED(r);
+    (void)dst;
+    return true;
 #elif defined(_WIN32)
     uintptr_t uintptrDst = reinterpret_cast<uintptr_t>(dst);
     for (auto it = VirtmemPlaceholders.begin(); it != VirtmemPlaceholders.end(); it++)
@@ -347,9 +307,8 @@ bool ARMJIT_Memory::UnmapFromRange(u32 addr, u32 num, u32 offset, u32 size) noex
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #ifdef __SWITCH__
-    Result r = svcUnmapProcessMemory(dst, envGetOwnProcessHandle(),
-        (u64)(MemoryBaseCodeMem + offset), size);
-    return R_SUCCEEDED(r);
+    (void)dst;
+    return true;
 #elif defined(_WIN32)
     if (!UnmapViewOfFileEx(dst, MEM_PRESERVE_PLACEHOLDER))
     {
@@ -457,15 +416,6 @@ void ARMJIT_Memory::Mapping::Unmap(int region, melonDS::NDS& nds) noexcept
                 offset += PageSize;
             }
 
-#ifdef __SWITCH__
-            if (status == memstate_MappedRW)
-            {
-                u32 segmentSize = offset - segmentOffset;
-                Log(LogLevel::Debug, "unmapping %x %x %x %x\n", Addr + segmentOffset, Num, segmentOffset + LocalOffset + OffsetsPerRegion[region], segmentSize);
-                bool success = memory.UnmapFromRange(Addr + segmentOffset, Num, segmentOffset + LocalOffset + OffsetsPerRegion[region], segmentSize);
-                assert(success);
-            }
-#endif
         }
     }
 
@@ -743,7 +693,11 @@ u32 ARMJIT_Memory::PageShift = 0;
 
 bool ARMJIT_Memory::IsFastMemSupported()
 {
-#if defined(__APPLE__) || defined(__OpenBSD__)
+#if defined(__SWITCH__)
+    PageSize = RegularPageSize;
+    PageShift = __builtin_ctz(PageSize);
+    return false;
+#elif defined(__APPLE__) || defined(__OpenBSD__)
     return false;
 #else
     static bool initialised = false;
@@ -769,7 +723,9 @@ bool ARMJIT_Memory::IsFastMemSupported()
 
 void ARMJIT_Memory::RegisterFaultHandler()
 {
-#ifdef _WIN32
+#if defined(__SWITCH__)
+    // nothing to register
+#elif defined(_WIN32)
     ExceptionHandlerHandle = AddVectoredExceptionHandler(1, ExceptionHandler);
 
     KernelBaseDll = LoadLibrary("KernelBase.dll");
@@ -798,7 +754,9 @@ void ARMJIT_Memory::RegisterFaultHandler()
 
 void ARMJIT_Memory::UnregisterFaultHandler()
 {
-#ifdef _WIN32
+#if defined(__SWITCH__)
+    // nothing to unregister
+#elif defined(_WIN32)
     if (ExceptionHandlerHandle)
     {
         RemoveVectoredExceptionHandler(ExceptionHandlerHandle);
@@ -845,28 +803,10 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 {
     ARMJIT_Global::Init();
 #if defined(__SWITCH__)
+    PageSize = RegularPageSize;
+    PageShift = __builtin_ctz(PageSize);
     MemoryBase = (u8*)aligned_alloc(0x1000, MemoryTotalSize);
-    virtmemLock();
-    MemoryBaseCodeMem = (u8*)virtmemFindCodeMemory(MemoryTotalSize, 0x1000);
-
-    bool succeded = R_SUCCEEDED(svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)MemoryBaseCodeMem,
-        (u64)MemoryBase, MemoryTotalSize));
-    assert(succeded);
-    succeded = R_SUCCEEDED(svcSetProcessMemoryPermission(envGetOwnProcessHandle(), (u64)MemoryBaseCodeMem,
-        MemoryTotalSize, Perm_Rw));
-    assert(succeded);
-
-    // 8 GB of address space, just don't ask...
-    FastMem9Start = virtmemFindAslr(AddrSpaceSize, 0x1000);
-    assert(FastMem9Start);
-    FastMem7Start = virtmemFindAslr(AddrSpaceSize, 0x1000);
-    assert(FastMem7Start);
-
-    FastMem9Reservation = virtmemAddReservation(FastMem9Start, AddrSpaceSize);
-    FastMem7Reservation = virtmemAddReservation(FastMem7Start, AddrSpaceSize);
-    virtmemUnlock();
-
-    u8* basePtr = MemoryBaseCodeMem;
+    memset(MemoryBase, 0, MemoryTotalSize);
 #elif defined(_WIN32)
     if (virtualAlloc2Ptr)
     {
@@ -930,18 +870,6 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 ARMJIT_Memory::~ARMJIT_Memory() noexcept
 {
 #if defined(__SWITCH__)
-    virtmemLock();
-    if (FastMem9Reservation)
-        virtmemRemoveReservation(FastMem9Reservation);
-
-    if (FastMem7Reservation)
-        virtmemRemoveReservation(FastMem7Reservation);
-
-    FastMem9Reservation = nullptr;
-    FastMem7Reservation = nullptr;
-    virtmemUnlock();
-
-    svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)MemoryBaseCodeMem, (u64)MemoryBase, MemoryTotalSize);
     free(MemoryBase);
     MemoryBase = nullptr;
 #elif defined(_WIN32)

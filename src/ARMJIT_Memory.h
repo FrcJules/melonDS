@@ -27,7 +27,7 @@
 #  include "TinyVector.h"
 #  include "ARM.h"
 #  if defined(__SWITCH__)
-#    include <switch.h>
+#    include <stdlib.h>
 #  elif defined(_WIN32)
 #    include <vector>
 #    include <windows.h>
@@ -173,8 +173,7 @@ private:
     u8* MemoryBase = nullptr;
 
 #if defined(__SWITCH__)
-    VirtmemReservation* FastMem9Reservation, *FastMem7Reservation;
-    u8* MemoryBaseCodeMem;
+    // no fast memory on the Switch: the emulated memory is a plain allocation
 #elif defined(_WIN32)
     struct VirtmemPlaceholder
     {

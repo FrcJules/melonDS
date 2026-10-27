@@ -1163,6 +1163,8 @@ void ARMJIT::JitEnableWrite() noexcept
             pthread_jit_write_protect_np(false);
     #elif defined(__NetBSD__)
         mprotect(JITCompiler.CodeMemBase, ARMJIT_Global::CodeMemorySliceSize, PROT_READ | PROT_WRITE);
+    #elif defined(__SWITCH__)
+        JITCompiler.SetJitWritable(true);
     #endif
 }
 
@@ -1173,6 +1175,8 @@ void ARMJIT::JitEnableExecute() noexcept
             pthread_jit_write_protect_np(true);
     #elif defined(__NetBSD__)
         mprotect(JITCompiler.CodeMemBase, ARMJIT_Global::CodeMemorySliceSize, PROT_READ | PROT_EXEC);
+    #elif defined(__SWITCH__)
+        JITCompiler.SetJitWritable(false);
     #endif
 }
 
