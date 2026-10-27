@@ -17,7 +17,7 @@
 */
 
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
-// Config: sdmc:/switch/melonds-fork/config.txt, one "key=value" per line:
+// Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
 // Every second a line "t fps avg_ms max_ms" is appended to sdmc:/switch/melonds-fork/log.txt.
 // Quit: hold L + R + PLUS + MINUS.
@@ -219,6 +219,17 @@ int main(int argc, char** argv)
     }
     nds->SetNDSCart(std::move(cart));
     nds->Reset();
+
+    // software renderer on its own thread (3 cores are available to homebrew)
+    if (cfg.count("threaded3d") && cfg["threaded3d"] == "1")
+    {
+        RendererSettings rendererSettings {};
+        rendererSettings.ScaleFactor = 1;
+        rendererSettings.Threaded = true;
+        nds->GetRenderer().SetRenderSettings(rendererSettings);
+        logf("threaded 3D renderer enabled\n");
+    }
+
     nds->SetupDirectBoot(cfg["rom"]);
     nds->Start();
     memlog("after Start");
