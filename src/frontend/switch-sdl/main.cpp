@@ -55,6 +55,10 @@ extern std::string SwitchLogPath;
 static std::atomic<int> DebugStage {0};
 static std::atomic<int> DebugFrames {0};
 
+// free memory as seen by the kernel, to find out whether an applet runs out of heap
+static void MemLog(const char* label);
+#define memlog(label) MemLog(label)
+
 static const char* ConfigDir = "sdmc:/switch/melonds-fork";
 
 static bool ReadFile(const std::string& path, std::unique_ptr<u8[]>& data, u32& len)
@@ -109,6 +113,17 @@ static u32 DSKeyForButton(int button)
     return 0;
 }
 
+static void MemLog(const char* label)
+{
+    u64 total = 0, used = 0;
+    svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    FILE* f = fopen((SwitchLogPath).c_str(), "a");
+    if (!f) return;
+    fprintf(f, "mem %s: used %llu / %llu MB\n", label, (unsigned long long)(used >> 20), (unsigned long long)(total >> 20));
+    fclose(f);
+}
+
 int main(int argc, char** argv)
 {
     mkdir(ConfigDir, 0777);
@@ -150,6 +165,24 @@ int main(int argc, char** argv)
         }
     }
 
+    memlog("before SDL");
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
+    SDL_Window* window = SDL_CreateWindow("melonDS", 0, 0, 1280, 720, 0);
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
+    for (int i = 0; i < SDL_NumJoysticks(); i++)
+        SDL_JoystickOpen(i);
+
+    SDL_AudioSpec want {}, have {};
+    want.freq = 32823;
+    want.format = AUDIO_S16SYS;
+    want.channels = 2;
+    want.samples = 1024;
+    SDL_AudioDeviceID audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    if (audio) SDL_PauseAudioDevice(audio, 0);
+
+    memlog("after SDL");
+
     std::unique_ptr<u8[]> romData;
     u32 romLen;
     if (!ReadFile(cfg["rom"], romData, romLen))
@@ -162,6 +195,7 @@ int main(int argc, char** argv)
     if (!cfg.count("jit") || cfg["jit"] != "1")
         args.JIT = std::nullopt;
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);
+    memlog("after NDS");
 
     NDSCart::NDSCartArgs cartArgs {};
     if (cfg.count("sav"))
@@ -187,21 +221,7 @@ int main(int argc, char** argv)
     nds->Reset();
     nds->SetupDirectBoot(cfg["rom"]);
     nds->Start();
-
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
-    SDL_Window* window = SDL_CreateWindow("melonDS", 0, 0, 1280, 720, 0);
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
-    for (int i = 0; i < SDL_NumJoysticks(); i++)
-        SDL_JoystickOpen(i);
-
-    SDL_AudioSpec want {}, have {};
-    want.freq = 32823;
-    want.format = AUDIO_S16SYS;
-    want.channels = 2;
-    want.samples = 1024;
-    SDL_AudioDeviceID audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-    if (audio) SDL_PauseAudioDevice(audio, 0);
+    memlog("after Start");
 
     // screens: 256x384 scaled to the 720 px height, centred
     const int dh = 720, dw = 480, dx = (1280 - dw) / 2;
