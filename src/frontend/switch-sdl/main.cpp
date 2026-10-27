@@ -304,7 +304,7 @@ int main(int argc, char** argv)
     ClkrstSession cpuSession {};
     bool clkOk = false;
     u32 oldClock = 0;
-    int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 1785);
+    int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 1224);
     bool threaded3d = cfg.count("threaded3d") ? cfg["threaded3d"] == "1" : (ui0.count("threaded") ? ui0["threaded"] == "1" : true);
     if (R_SUCCEEDED(clkrstInitialize()))
     {
