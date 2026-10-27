@@ -19,6 +19,10 @@
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
+//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)
+// Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
+//   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
+//   The state is also saved automatically on exit (slot 0) and loaded at start.
 // Every second a line "t fps avg_ms max_ms" is appended to sdmc:/switch/melonds-fork/log.txt.
 // Quit: hold L + R + PLUS + MINUS.
 
@@ -43,6 +47,7 @@
 #include "NDS.h"
 #include "NDSCart.h"
 #include "Platform.h"
+#include "Savestate.h"
 
 using namespace melonDS;
 
@@ -188,12 +193,14 @@ int main(int argc, char** argv)
         SDL_JoystickOpen(i);
 
     SDL_AudioSpec want {}, have {};
-    want.freq = 32823;
+    want.freq = 48000;
     want.format = AUDIO_S16SYS;
     want.channels = 2;
     want.samples = 1024;
     SDL_AudioDeviceID audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
     if (audio) SDL_PauseAudioDevice(audio, 0);
+    const int audioRate = have.freq ? have.freq : want.freq;
+    logf("audio: %d Hz, %d channels, format 0x%x, buffer %d samples\n", have.freq, have.channels, (unsigned)have.format, have.samples);
 
     memlog("after SDL");
 
@@ -224,6 +231,9 @@ int main(int argc, char** argv)
         args.JIT = std::nullopt;
     else if (cfg.count("fastmem") && cfg["fastmem"] == "0")
         args.JIT->FastMemory = false;
+    args.OutputSampleRate = audioRate;
+    args.Interpolation = static_cast<AudioInterpolation>(cfg.count("audiointerp") ? std::clamp(atoi(cfg["audiointerp"].c_str()), 0, 4) : 3);
+    logf("audio interpolation: %d\n", (int)args.Interpolation);
     DebugStage = 10;
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);
     logf("addrs: main=%llx win9=%llx win7=%llx codemem=%llx\n", (unsigned long long)(u64)&main, (unsigned long long)SwitchDbgWin9, (unsigned long long)SwitchDbgWin7, (unsigned long long)SwitchDbgCodeMem);
@@ -276,6 +286,59 @@ int main(int argc, char** argv)
     const int dh = 720, dw = 480, dx = (1280 - dw) / 2;
     SDL_Rect dst {dx, 0, dw, dh};
 
+    // save states
+    std::string romBase = cfg["rom"];
+    {
+        size_t sl = romBase.find_last_of('/');
+        std::string name = sl == std::string::npos ? romBase : romBase.substr(sl + 1);
+        size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos) name = name.substr(0, dot);
+        romBase = std::string(ConfigDir) + "/" + name;
+    }
+    auto statePath = [&](int slot) { return romBase + ".ss" + std::to_string(slot); };
+    auto saveState = [&](const std::string& path) -> bool {
+        Savestate st;
+        if (st.Error) return false;
+        if (!nds->DoSavestate(&st) || st.Error) return false;
+        std::string tmp = path + ".tmp";
+        FILE* f = fopen(tmp.c_str(), "wb");
+        if (!f) return false;
+        bool ok = fwrite(st.Buffer(), 1, st.Length(), f) == st.Length();
+        ok = (fclose(f) == 0) && ok;
+        if (!ok) { remove(tmp.c_str()); return false; }
+        remove(path.c_str());
+        return rename(tmp.c_str(), path.c_str()) == 0;
+    };
+    auto loadState = [&](const std::string& path) -> bool {
+        std::unique_ptr<u8[]> data;
+        u32 len = 0;
+        if (!ReadFile(path, data, len) || len < 16) return false;
+        // keep the running state so that a bad file does not leave the emulator half-loaded
+        Savestate backup;
+        if (backup.Error || !nds->DoSavestate(&backup) || backup.Error) return false;
+        Savestate st(data.get(), len, false);
+        if (!st.Error && nds->DoSavestate(&st) && !st.Error) return true;
+        Savestate restore(backup.Buffer(), backup.Length(), false);
+        nds->DoSavestate(&restore);
+        return false;
+    };
+    const bool autosave = !cfg.count("autosave") || cfg["autosave"] != "0";
+    if (!cfg.count("autoload") || cfg["autoload"] != "0")
+    {
+        FILE* f = fopen(statePath(0).c_str(), "rb");
+        if (f)
+        {
+            fclose(f);
+            logf("autoload slot 0: %s\n", loadState(statePath(0)) ? "ok" : "FAILED");
+        }
+    }
+    int slot = 1;
+    u32 pad = 0;                      // raw SDL buttons held (bit = button number)
+    u8 fbR = 0, fbG = 0, fbB = 0;     // feedback colour of the last state action
+    int fbSlot = 0;
+    auto fbUntil = std::chrono::steady_clock::now();
+    auto feedback = [&](u8 r, u8 g, u8 b, int sl) { fbR = r; fbG = g; fbB = b; fbSlot = sl; fbUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000); };
+
     u32 keys = 0;
     bool running = true;
     bool touching = false;
@@ -286,14 +349,46 @@ int main(int argc, char** argv)
     int frames = 0;
     double sumMs = 0, maxMs = 0;
     int seconds = 0;
+    u64 audioUnderruns = 0, audioDrops = 0;
 
     while (running && appletMainLoop())
     {
         SDL_Event ev;
         while (SDL_PollEvent(&ev))
         {
-            if (ev.type == SDL_JOYBUTTONDOWN) keys |= DSKeyForButton(ev.jbutton.button);
-            else if (ev.type == SDL_JOYBUTTONUP) keys &= ~DSKeyForButton(ev.jbutton.button);
+            if (ev.type == SDL_JOYBUTTONDOWN)
+            {
+                int b = ev.jbutton.button;
+                if (b < 32) pad |= 1u << b;
+                if ((pad & (1u << 8)) && (pad & (1u << 9)))   // ZL + ZR held: hotkeys, the game gets no buttons
+                {
+                    if (b == 2)
+                    {
+                        bool ok = saveState(statePath(slot));
+                        logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED");
+                        feedback(ok ? 40 : 220, ok ? 200 : 40, 40, slot);
+                    }
+                    else if (b == 3)
+                    {
+                        bool ok = loadState(statePath(slot));
+                        logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED");
+                        if (ok && audio) SDL_ClearQueuedAudio(audio);
+                        feedback(ok ? 50 : 220, ok ? 120 : 40, ok ? 230 : 40, slot);
+                    }
+                    else if (b == 12 || b == 14)
+                    {
+                        slot = b == 14 ? std::min(slot + 1, 4) : std::max(slot - 1, 1);
+                        feedback(230, 200, 40, slot);
+                    }
+                }
+                else keys |= DSKeyForButton(b);
+            }
+            else if (ev.type == SDL_JOYBUTTONUP)
+            {
+                int b = ev.jbutton.button;
+                if (b < 32) pad &= ~(1u << b);
+                keys &= ~DSKeyForButton(b);
+            }
             else if (ev.type == SDL_FINGERDOWN || ev.type == SDL_FINGERMOTION)
             {
                 int px = (int)(ev.tfinger.x * 1280), py = (int)(ev.tfinger.y * 720);
@@ -317,7 +412,7 @@ int main(int argc, char** argv)
             break;
 
         DebugStage = 2;
-        nds->SetKeyMask(~keys & 0xFFF);
+        nds->SetKeyMask(((pad & (1u << 8)) && (pad & (1u << 9))) ? 0xFFF : (~keys & 0xFFF));
 
         auto t0 = clock::now();
         nds->RunFrame();
@@ -345,10 +440,28 @@ int main(int argc, char** argv)
         DebugStage = 4;
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
+        if (clock::now() < fbUntil)
+        {
+            SDL_SetRenderDrawColor(renderer, fbR, fbG, fbB, 255);
+            for (int i = 0; i < std::max(fbSlot, 1); i++)
+            {
+                SDL_Rect r {40 + i * 48, 40, fbSlot == 0 ? 16 : 36, 36};
+                SDL_RenderFillRect(renderer, &r);
+            }
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        }
         SDL_RenderPresent(renderer);
 
         DebugStage = 5;
-        // drain the SPU every frame; keep about 150 ms of audio queued, drop the rest (low latency)
+        // drain the SPU every frame. The DS runs at 59.83 fps and the display at 60: instead of dropping audio
+        // (clicks), nudge the SPU output rate so that the SDL queue stays around 100 ms.
+        if (audio)
+        {
+            if (SDL_GetQueuedAudioSize(audio) == 0) audioUnderruns++;
+            double queuedMs = SDL_GetQueuedAudioSize(audio) / 4.0 * 1000.0 / audioRate;
+            double err = std::clamp((queuedMs - 100.0) / 100.0, -1.0, 1.0);
+            nds->SPU.SetOutputSkew(1.0029 + 0.004 * err);
+        }
         for (;;)
         {
             int avail = nds->SPU.GetOutputSize();
@@ -356,8 +469,10 @@ int main(int argc, char** argv)
             int n = std::min(avail, (int)(audioBuf.size() / 2));
             n = nds->SPU.ReadOutput(audioBuf.data(), n);
             if (n <= 0) break;
-            if (audio && SDL_GetQueuedAudioSize(audio) < 32823 * 4 * 150 / 1000)
+            if (audio && SDL_GetQueuedAudioSize(audio) < (u32)audioRate * 4 * 400 / 1000)
                 SDL_QueueAudio(audio, audioBuf.data(), n * 2 * sizeof(s16));
+            else
+                audioDrops++;
         }
 
         auto now = clock::now();
@@ -371,11 +486,14 @@ int main(int argc, char** argv)
             if (gpuOk) clkrstGetClockRate(&gpuSession, &gpuClock);
             float temp = 0;
             if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / 32823) : 0u, (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
     }
+
+    if (autosave)
+        logf("autosave slot 0: %s\n", saveState(statePath(0)) ? "ok" : "FAILED");
 
     watchdogStop = true;
     watchdog.join();
