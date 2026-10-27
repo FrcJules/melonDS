@@ -839,11 +839,17 @@ int main(int argc, char** argv)
     if (fpsTex) SDL_DestroyTexture(fpsTex);
     if (UIFont) TTF_CloseFont(UIFont);
     TTF_Quit();
+    logf("exit step 1\n");
     plExit();
+    logf("exit step 2\n");
     SDL_DestroyTexture(tex);
+    logf("exit step 3\n");
     SDL_DestroyRenderer(renderer);
+    logf("exit step 4\n");
     SDL_DestroyWindow(window);
+    logf("exit step 5\n");
     SDL_Quit();
+    logf("exit step 6\n");
     if (clkOk)
     {
         if (oldClock) clkrstSetClockRate(&cpuSession, oldClock);
@@ -853,12 +859,15 @@ int main(int argc, char** argv)
     if (gpuOk) clkrstCloseSession(&gpuSession);
     if (tsOk) tsSessionClose(&tsSession);
     tsExit();
+    logf("exit step 7\n");
     clkrstExit();
+    logf("exit step 8\n");
     if (relaunch)
     {
         // come back to this homebrew with the ROM browser open
         std::string line = std::string("\"") + argv[0] + "\" --browse";
         envSetNextLoad(argv[0], line.c_str());
     }
+    logf("exit: main returns, emulator destructors next\n");
     return 0;
 }
