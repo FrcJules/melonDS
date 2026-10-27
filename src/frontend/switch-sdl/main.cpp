@@ -304,7 +304,11 @@ int main(int argc, char** argv)
     ClkrstSession cpuSession {};
     bool clkOk = false;
     u32 oldClock = 0;
-    int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 1224);
+    // CPU clock: config.txt overclock= (fixed) > ui.txt cpu= (0 = auto) > auto. Auto starts at 1224 MHz and goes to 1785 MHz
+    // when the game drops under 57 fps for 3 seconds (it never goes back down during a session)
+    int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 0);
+    bool autoClock = overclockMHz == 0 && !cfg.count("overclock");
+    if (autoClock) overclockMHz = 1224;
     bool threaded3d = cfg.count("threaded3d") ? cfg["threaded3d"] == "1" : (ui0.count("threaded") ? ui0["threaded"] == "1" : true);
     if (R_SUCCEEDED(clkrstInitialize()))
     {
@@ -360,7 +364,7 @@ int main(int argc, char** argv)
     auto saveUi = [&]() {
         FILE* f = fopen((std::string(ConfigDir) + "/ui.txt").c_str(), "w");
         if (!f) return;
-        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\n", layout, filter, showFps ? 1 : 0, overclockMHz, threaded3d ? 1 : 0);
+        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\n", layout, filter, showFps ? 1 : 0, autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0);
         fclose(f);
     };
 
@@ -543,6 +547,8 @@ int main(int argc, char** argv)
         }
     }
     int slot = 1;
+    int lowFpsSeconds = 0;
+    double audioSkew = 1.0;
     u32 pad = 0;                      // raw SDL buttons held (bit = button number)
     u8 fbR = 0, fbG = 0, fbB = 0;     // feedback colour of the last state action
     int fbSlot = 0;
@@ -581,7 +587,7 @@ int main(int argc, char** argv)
                 if (i == 1) label += std::string(" : ") + (layout ? "côte à côte" : "empilées");
                 if (i == 2) label += std::string(" : ") + (filter ? "lissé" : "pixels nets");
                 if (i == 3) label += std::string(" : ") + (showFps ? "oui" : "non");
-                if (i == 4) label += " : " + std::to_string(overclockMHz) + " MHz";
+                if (i == 4) label += autoClock ? " : auto (" + std::to_string(overclockMHz) + " MHz)" : " : " + std::to_string(overclockMHz) + " MHz";
                 if (i == 5) label += std::string(" : ") + (threaded3d ? "oui" : "non");
                 if (i == 6) label += " : " + std::to_string(slot);
                 int y = 90 + i * 46;
@@ -615,11 +621,14 @@ int main(int argc, char** argv)
                 case 3: showFps = !showFps; saveUi(); break;
                 case 4:
                 {
-                    const int steps[] = {1020, 1224, 1581, 1785};
+                    const int steps[] = {0, 1020, 1224, 1581, 1785};   // 0 = auto
                     int idx = 0;
-                    for (int k = 0; k < 4; k++) if (steps[k] <= overclockMHz) idx = k;
-                    idx = dir ? std::clamp(idx + dir, 0, 3) : (idx + 1) % 4;
-                    overclockMHz = steps[idx];
+                    if (!autoClock)
+                        for (int k = 1; k < 5; k++) if (steps[k] <= overclockMHz) idx = k;
+                    idx = dir ? std::clamp(idx + dir, 0, 4) : (idx + 1) % 5;
+                    autoClock = steps[idx] == 0;
+                    overclockMHz = autoClock ? 1224 : steps[idx];
+                    lowFpsSeconds = 0;
                     if (clkOk) clkrstSetClockRate(&cpuSession, (u32)overclockMHz * 1000000u);
                     saveUi();
                     break;
@@ -784,7 +793,8 @@ int main(int argc, char** argv)
             double err = std::clamp((queuedMs - 100.0) / 100.0, -1.0, 1.0);
             // queue too full: drop a little audio (+0.4% at most); queue running dry (emulation slower than real time):
             // stretch the audio instead of letting it underrun (pitch drops a little, no crackling)
-            nds->SPU.SetOutputSkew(std::max(1.0029 + (err >= 0 ? 0.004 * err : 0.5 * err), 0.7));
+            audioSkew = std::max(1.0029 + (err >= 0 ? 0.004 * err : 0.5 * err), 0.7);
+            nds->SPU.SetOutputSkew(audioSkew);
         }
         for (;;)
         {
@@ -823,7 +833,17 @@ int main(int argc, char** argv)
             if (gpuOk) clkrstGetClockRate(&gpuSession, &gpuClock);
             float temp = 0;
             if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.2f faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
+            if (autoClock && overclockMHz < 1785)
+            {
+                lowFpsSeconds = frames < 57 ? lowFpsSeconds + 1 : 0;
+                if (lowFpsSeconds >= 3)
+                {
+                    overclockMHz = 1785;
+                    if (clkOk) clkrstSetClockRate(&cpuSession, 1785u * 1000000u);
+                    logf("auto clock: %d fps for 3 s, CPU raised to 1785 MHz\n", frames);
+                }
+            }
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
