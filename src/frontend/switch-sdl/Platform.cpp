@@ -31,6 +31,8 @@
 #include <mutex>
 #include <thread>
 
+#include <switch.h>
+
 #include "Platform.h"
 
 std::string SwitchSavePath;
@@ -215,9 +217,16 @@ struct Thread
     std::thread Handle;
 };
 
+// core the emulation helper threads (threaded 3D renderer) are pinned to; -1 = let the scheduler decide
+int SwitchHelperCore = -1;
+
 Thread* Thread_Create(std::function<void()> func)
 {
-    return new Thread {std::thread(std::move(func))};
+    return new Thread {std::thread([func = std::move(func)]() {
+        if (SwitchHelperCore >= 0)
+            svcSetThreadCoreMask(CUR_THREAD_HANDLE, SwitchHelperCore, 1u << SwitchHelperCore);
+        func();
+    })};
 }
 
 void Thread_Free(Thread* thread)

@@ -58,6 +58,7 @@ namespace melonDS { extern u64 SwitchJitTransitions; extern u64 SwitchJitTransit
 
 extern std::string SwitchSavePath;
 extern std::string SwitchLogPath;
+namespace melonDS::Platform { extern int SwitchHelperCore; }
 
 // where the main loop currently is, logged once per second by a watchdog thread (to locate hangs)
 static std::atomic<int> DebugStage {0};
@@ -293,13 +294,18 @@ int main(int argc, char** argv)
     };
 
     auto cfg = ReadConfig();
-    logf("=== melonDS fork (Switch) start, jit=%s ===\n", cfg.count("jit") ? cfg["jit"].c_str() : "0");
+    if (cfg.count("helpercore")) Platform::SwitchHelperCore = atoi(cfg["helpercore"].c_str());
+    // defaults (best measured setup); config.txt overrides, then ui.txt (menu), then the defaults below
+    auto ui0 = ReadConfig("ui.txt");
+    const bool useJit = !cfg.count("jit") || cfg["jit"] != "0";
+    logf("=== melonDS fork (Switch) start, jit=%d ===\n", useJit ? 1 : 0);
 
     // optional CPU overclock (off by default), restored on exit
     ClkrstSession cpuSession {};
     bool clkOk = false;
     u32 oldClock = 0;
-    int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : 0;
+    int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 1785);
+    bool threaded3d = cfg.count("threaded3d") ? cfg["threaded3d"] == "1" : (ui0.count("threaded") ? ui0["threaded"] == "1" : true);
     if (R_SUCCEEDED(clkrstInitialize()))
     {
         if (R_SUCCEEDED(clkrstOpenSession(&cpuSession, PcvModuleId_CpuBus, 3)))
@@ -333,8 +339,9 @@ int main(int argc, char** argv)
     SDL_Window* window = SDL_CreateWindow("melonDS", 0, 0, 1280, 720, 0);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     SDL_Texture* tex = nullptr;
+    std::vector<SDL_Joystick*> joysticks;
     for (int i = 0; i < SDL_NumJoysticks(); i++)
-        SDL_JoystickOpen(i);
+        joysticks.push_back(SDL_JoystickOpen(i));
 
     // text: the console's shared font
     if (R_SUCCEEDED(plInitialize(PlServiceType_User)) && TTF_Init() == 0)
@@ -353,7 +360,7 @@ int main(int argc, char** argv)
     auto saveUi = [&]() {
         FILE* f = fopen((std::string(ConfigDir) + "/ui.txt").c_str(), "w");
         if (!f) return;
-        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\n", layout, filter, showFps ? 1 : 0);
+        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\n", layout, filter, showFps ? 1 : 0, overclockMHz, threaded3d ? 1 : 0);
         fclose(f);
     };
 
@@ -430,7 +437,7 @@ int main(int argc, char** argv)
     }
 
     NDSArgs args;
-    if (!cfg.count("jit") || cfg["jit"] != "1")
+    if (!useJit)
         args.JIT = std::nullopt;
     else if (cfg.count("fastmem") && cfg["fastmem"] == "0")
         args.JIT->FastMemory = false;
@@ -468,7 +475,7 @@ int main(int argc, char** argv)
     DebugStage = 12;
 
     // software renderer on its own thread (3 cores are available to homebrew)
-    if (cfg.count("threaded3d") && cfg["threaded3d"] == "1")
+    if (threaded3d)
     {
         RendererSettings rendererSettings {};
         rendererSettings.ScaleFactor = 1;
@@ -482,7 +489,7 @@ int main(int argc, char** argv)
     DebugStage = 14;
     nds->Start();
     DebugStage = 15;
-    logf("fastmem: %s\n", nds->JIT.FastMemoryEnabled() ? "on" : "off");
+    logf("fastmem: %s, main thread on core %d, helper core %d\n", nds->JIT.FastMemoryEnabled() ? "on" : "off", (int)svcGetCurrentProcessorNumber(), Platform::SwitchHelperCore);
     memlog("after Start");
 
     // screens: stacked (480x720, centred) or side by side (2 x 640x480)
@@ -553,8 +560,8 @@ int main(int argc, char** argv)
         if (audio) SDL_PauseAudioDevice(audio, 1);
         const int prevStage = DebugStage;
         DebugStage = 99;   // paused: the watchdog must not report a hang
-        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
-        const int count = 9;
+        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Fréquence CPU", "3D en thread séparé", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
+        const int count = 11;
         int sel = 0, result = -1;
         std::string note;
         while (result < 0 && appletMainLoop())
@@ -574,17 +581,19 @@ int main(int argc, char** argv)
                 if (i == 1) label += std::string(" : ") + (layout ? "côte à côte" : "empilées");
                 if (i == 2) label += std::string(" : ") + (filter ? "lissé" : "pixels nets");
                 if (i == 3) label += std::string(" : ") + (showFps ? "oui" : "non");
-                if (i == 4) label += " : " + std::to_string(slot);
-                int y = 100 + i * 52;
+                if (i == 4) label += " : " + std::to_string(overclockMHz) + " MHz";
+                if (i == 5) label += std::string(" : ") + (threaded3d ? "oui" : "non");
+                if (i == 6) label += " : " + std::to_string(slot);
+                int y = 90 + i * 46;
                 if (i == sel)
                 {
                     SDL_SetRenderDrawColor(renderer, 40, 70, 110, 255);
-                    SDL_Rect bar {400, y - 4, 480, 46};
+                    SDL_Rect bar {400, y - 4, 480, 42};
                     SDL_RenderFillRect(renderer, &bar);
                 }
                 DrawText(renderer, label, 420, y, i == sel ? White : Grey);
             }
-            if (!note.empty()) DrawText(renderer, note, 420, 100 + count * 52 + 8, Accent);
+            if (!note.empty()) DrawText(renderer, note, 420, 90 + count * 46 + 8, Accent);
             DrawText(renderer, "A : valider   gauche/droite : changer   B : retour", 330, 672, Grey);
             SDL_RenderPresent(renderer);
 
@@ -604,11 +613,32 @@ int main(int argc, char** argv)
                 case 1: layout ^= 1; computeLayout(); saveUi(); break;
                 case 2: filter ^= 1; makeTexture(); saveUi(); break;
                 case 3: showFps = !showFps; saveUi(); break;
-                case 4: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
-                case 5: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
-                case 6: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
-                case 7: if (act) result = 1; break;
-                case 8: if (act) result = 2; break;
+                case 4:
+                {
+                    const int steps[] = {1020, 1224, 1581, 1785};
+                    int idx = 0;
+                    for (int k = 0; k < 4; k++) if (steps[k] <= overclockMHz) idx = k;
+                    idx = dir ? std::clamp(idx + dir, 0, 3) : (idx + 1) % 4;
+                    overclockMHz = steps[idx];
+                    if (clkOk) clkrstSetClockRate(&cpuSession, (u32)overclockMHz * 1000000u);
+                    saveUi();
+                    break;
+                }
+                case 5:
+                {
+                    threaded3d = !threaded3d;
+                    RendererSettings rs {};
+                    rs.ScaleFactor = 1;
+                    rs.Threaded = threaded3d;
+                    nds->GetRenderer().SetRenderSettings(rs);
+                    saveUi();
+                    break;
+                }
+                case 6: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
+                case 7: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
+                case 8: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
+                case 9: if (act) result = 1; break;
+                case 10: if (act) result = 2; break;
                 }
             }
         }
@@ -804,13 +834,19 @@ int main(int argc, char** argv)
     watchdog.join();
     logf("=== stop ===\n");
     if (audio) SDL_CloseAudioDevice(audio);
+    for (SDL_Joystick* j : joysticks)
+        if (j) SDL_JoystickClose(j);
+    if (fpsTex) SDL_DestroyTexture(fpsTex);
+    if (UIFont) TTF_CloseFont(UIFont);
+    TTF_Quit();
+    plExit();
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
     if (clkOk)
     {
-        if (overclockMHz > 0 && oldClock) clkrstSetClockRate(&cpuSession, oldClock);
+        if (oldClock) clkrstSetClockRate(&cpuSession, oldClock);
         clkrstCloseSession(&cpuSession);
     }
     if (emcOk) clkrstCloseSession(&emcSession);
