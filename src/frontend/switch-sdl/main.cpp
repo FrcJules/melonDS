@@ -46,7 +46,7 @@
 
 using namespace melonDS;
 
-namespace melonDS { extern u64 SwitchJitTransitions; extern u64 SwitchJitTransitionNs; }
+namespace melonDS { extern u64 SwitchJitTransitions; extern u64 SwitchJitTransitionNs; extern const char* SwitchCrashLogPath; extern u64 SwitchDbgWin9, SwitchDbgWin7, SwitchDbgCodeMem; extern u64 SwitchFaultCount, SwitchLastFaultAddr, SwitchLastFaultPC; }
 
 extern std::string SwitchSavePath;
 extern std::string SwitchLogPath;
@@ -128,6 +128,7 @@ int main(int argc, char** argv)
 {
     mkdir(ConfigDir, 0777);
     SwitchLogPath = std::string(ConfigDir) + "/log.txt";
+    melonDS::SwitchCrashLogPath = SwitchLogPath.c_str();
     // the file is closed after every line: FAT only records its size on close, and the log must be readable while the app runs
     auto logf = [](const char* fmt, auto... a) {
         FILE* f = fopen(SwitchLogPath.c_str(), "a");
@@ -183,6 +184,20 @@ int main(int argc, char** argv)
 
     memlog("after SDL");
 
+    std::atomic<bool> watchdogStop {false};
+    std::thread watchdog([&]() {
+        int last = -1, idle = 0;
+        while (!watchdogStop)
+        {
+            SDL_Delay(1000);
+            int frames = DebugFrames;
+            idle = (frames == last) ? idle + 1 : 0;
+            last = frames;
+            if (idle >= 1)
+                logf("watchdog: no frame progress for %ds (frames=%d, stage=%d, faults=%llu, lastfault addr=%llx pc=%llx)\n", idle, frames, (int)DebugStage, (unsigned long long)SwitchFaultCount, (unsigned long long)SwitchLastFaultAddr, (unsigned long long)SwitchLastFaultPC);
+        }
+    });
+
     std::unique_ptr<u8[]> romData;
     u32 romLen;
     if (!ReadFile(cfg["rom"], romData, romLen))
@@ -194,7 +209,11 @@ int main(int argc, char** argv)
     NDSArgs args;
     if (!cfg.count("jit") || cfg["jit"] != "1")
         args.JIT = std::nullopt;
+    else if (cfg.count("fastmem") && cfg["fastmem"] == "0")
+        args.JIT->FastMemory = false;
+    DebugStage = 10;
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);
+    logf("addrs: main=%llx win9=%llx win7=%llx codemem=%llx\n", (unsigned long long)(u64)&main, (unsigned long long)SwitchDbgWin9, (unsigned long long)SwitchDbgWin7, (unsigned long long)SwitchDbgCodeMem);
     memlog("after NDS");
 
     NDSCart::NDSCartArgs cartArgs {};
@@ -218,7 +237,9 @@ int main(int argc, char** argv)
         return 1;
     }
     nds->SetNDSCart(std::move(cart));
+    DebugStage = 11;
     nds->Reset();
+    DebugStage = 12;
 
     // software renderer on its own thread (3 cores are available to homebrew)
     if (cfg.count("threaded3d") && cfg["threaded3d"] == "1")
@@ -230,27 +251,17 @@ int main(int argc, char** argv)
         logf("threaded 3D renderer enabled\n");
     }
 
+    DebugStage = 13;
     nds->SetupDirectBoot(cfg["rom"]);
+    DebugStage = 14;
     nds->Start();
+    DebugStage = 15;
+    logf("fastmem: %s\n", nds->JIT.FastMemoryEnabled() ? "on" : "off");
     memlog("after Start");
 
     // screens: 256x384 scaled to the 720 px height, centred
     const int dh = 720, dw = 480, dx = (1280 - dw) / 2;
     SDL_Rect dst {dx, 0, dw, dh};
-
-    std::atomic<bool> watchdogStop {false};
-    std::thread watchdog([&]() {
-        int last = -1, idle = 0;
-        while (!watchdogStop)
-        {
-            SDL_Delay(1000);
-            int frames = DebugFrames;
-            idle = (frames == last) ? idle + 1 : 0;
-            last = frames;
-            if (idle >= 1)
-                logf("watchdog: no frame progress for %ds (frames=%d, stage=%d)\n", idle, frames, (int)DebugStage);
-        }
-    });
 
     u32 keys = 0;
     bool running = true;

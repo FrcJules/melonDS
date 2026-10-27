@@ -19,6 +19,7 @@
 #if defined(__SWITCH__)
 #include <stdlib.h>
 #include <string.h>
+#include <switch.h>
 #elif defined(_WIN32)
 #include <windows.h>
 #else
@@ -117,7 +118,68 @@ using Platform::LogLevel;
 #endif
 
 #if defined(__SWITCH__)
-// no fault handler: fast memory is not supported on the Switch, every access takes the slow path
+// whether the fastmem windows could be set up (the check happens once, in the first ARMJIT_Memory constructor)
+static bool SwitchFastMemOK = false;
+u64 SwitchFaultCount = 0, SwitchLastFaultAddr = 0, SwitchLastFaultPC = 0;
+const char* SwitchCrashLogPath = nullptr; // set by the frontend: where to write a line about an unhandled exception
+u64 SwitchDbgWin9 = 0, SwitchDbgWin7 = 0, SwitchDbgCodeMem = 0;
+
+u32 SwitchCrashDesc = 0; u64 SwitchCrashPC = 0, SwitchCrashFAR = 0, SwitchCrashLR = 0, SwitchCrashSP = 0;
+
+static void SwitchCrashTrampoline()
+{
+    if (SwitchCrashLogPath)
+    {
+        FILE* f = fopen(SwitchCrashLogPath, "a");
+        if (f)
+        {
+            fprintf(f, "unhandled exception: desc=0x%x pc=%llx far=%llx lr=%llx sp=%llx handled-faults=%llu\n", SwitchCrashDesc,
+                (unsigned long long)SwitchCrashPC, (unsigned long long)SwitchCrashFAR, (unsigned long long)SwitchCrashLR,
+                (unsigned long long)SwitchCrashSP, (unsigned long long)SwitchFaultCount);
+            fclose(f);
+        }
+    }
+    svcBreak(BreakReason_Panic, 0, 0);
+    for (;;) {}
+}
+
+extern "C"
+{
+
+void ARM_RestoreContext(u64* registers) __attribute__((noreturn));
+
+// libnx calls this on the faulting thread, on its own stack
+alignas(16) u8 __nx_exception_stack[0x8000];
+u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+
+void __libnx_exception_handler(ThreadExceptionDump* ctx)
+{
+    u8* pc = (u8*)ctx->pc.x;
+    if (ARMJIT_Memory::HandleSwitchFault(ctx->far.x, pc))
+    {
+        u64 integerRegisters[33];
+        memcpy(integerRegisters, &ctx->cpu_gprs[0].x, 8*29);
+        integerRegisters[29] = ctx->fp.x;
+        integerRegisters[30] = ctx->lr.x;
+        integerRegisters[31] = ctx->sp.x;
+        integerRegisters[32] = (u64)pc;
+
+        ARM_RestoreContext(integerRegisters);
+    }
+
+    // not ours: resume on the normal thread stack in a function that logs the exception and aborts
+    // (stdio does not work inside this handler)
+    SwitchCrashDesc = ctx->error_desc; SwitchCrashPC = ctx->pc.x; SwitchCrashFAR = ctx->far.x; SwitchCrashLR = ctx->lr.x; SwitchCrashSP = ctx->sp.x;
+    u64 regs[33];
+    memcpy(regs, &ctx->cpu_gprs[0].x, 8*29);
+    regs[29] = ctx->fp.x;
+    regs[30] = ctx->lr.x;
+    regs[31] = ctx->sp.x;
+    regs[32] = (u64)&SwitchCrashTrampoline;
+    ARM_RestoreContext(regs);
+}
+
+}
 
 #elif defined(_WIN32)
 
@@ -250,8 +312,8 @@ bool ARMJIT_Memory::MapIntoRange(u32 addr, u32 num, u32 offset, u32 size) noexce
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #ifdef __SWITCH__
-    (void)dst;
-    return true;
+    Result r = svcMapProcessMemory(dst, envGetOwnProcessHandle(), (u64)(MemoryBaseCodeMem + offset), size);
+    return R_SUCCEEDED(r);
 #elif defined(_WIN32)
     uintptr_t uintptrDst = reinterpret_cast<uintptr_t>(dst);
     for (auto it = VirtmemPlaceholders.begin(); it != VirtmemPlaceholders.end(); it++)
@@ -307,8 +369,8 @@ bool ARMJIT_Memory::UnmapFromRange(u32 addr, u32 num, u32 offset, u32 size) noex
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
 #ifdef __SWITCH__
-    (void)dst;
-    return true;
+    Result r = svcUnmapProcessMemory(dst, envGetOwnProcessHandle(), (u64)(MemoryBaseCodeMem + offset), size);
+    return R_SUCCEEDED(r);
 #elif defined(_WIN32)
     if (!UnmapViewOfFileEx(dst, MEM_PRESERVE_PLACEHOLDER))
     {
@@ -416,6 +478,14 @@ void ARMJIT_Memory::Mapping::Unmap(int region, melonDS::NDS& nds) noexcept
                 offset += PageSize;
             }
 
+#ifdef __SWITCH__
+            if (status == memstate_MappedRW)
+            {
+                u32 segmentSize = offset - segmentOffset;
+                bool success = nds.JIT.Memory.UnmapFromRange(Addr + segmentOffset, Num, segmentOffset + LocalOffset + OffsetsPerRegion[region], segmentSize);
+                assert(success);
+            }
+#endif
         }
     }
 
@@ -696,7 +766,7 @@ bool ARMJIT_Memory::IsFastMemSupported()
 #if defined(__SWITCH__)
     PageSize = RegularPageSize;
     PageShift = __builtin_ctz(PageSize);
-    return false;
+    return SwitchFastMemOK;
 #elif defined(__APPLE__) || defined(__OpenBSD__)
     return false;
 #else
@@ -799,14 +869,81 @@ bool ARMJIT_Memory::FaultHandler(FaultDescription& faultDesc, melonDS::NDS& nds)
     return false;
 }
 
+#ifdef __SWITCH__
+bool ARMJIT_Memory::HandleSwitchFault(u64 faultAddr, u8*& pc) noexcept
+{
+    // statistics/diagnostics read by the frontend watchdog
+    SwitchFaultCount++;
+    SwitchLastFaultAddr = faultAddr;
+    SwitchLastFaultPC = (u64)pc;
+    melonDS::NDS* nds = NDS::Current;
+    if (!nds)
+        return false;
+
+    u8* curArea = (u8*)(nds->CurCPU == 0 ? nds->JIT.Memory.FastMem9Start : nds->JIT.Memory.FastMem7Start);
+    if (!curArea || faultAddr < (u64)curArea || faultAddr - (u64)curArea >= AddrSpaceSize)
+        return false;
+
+    FaultDescription desc {};
+    desc.EmulatedFaultAddr = (u32)(faultAddr - (u64)curArea);
+    desc.FaultPC = pc;
+    if (!FaultHandler(desc, *nds))
+        return false;
+
+    pc = desc.FaultPC;
+    return true;
+}
+#endif
+
 ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 {
     ARMJIT_Global::Init();
 #if defined(__SWITCH__)
     PageSize = RegularPageSize;
     PageShift = __builtin_ctz(PageSize);
-    MemoryBase = (u8*)aligned_alloc(0x1000, MemoryTotalSize);
-    memset(MemoryBase, 0, MemoryTotalSize);
+    MemoryHeapBase = (u8*)aligned_alloc(0x1000, MemoryTotalSize);
+    MemoryBase = MemoryHeapBase;
+
+    {
+        // second RW view of the same pages, mapped piecewise into the fastmem windows
+        Handle self = envGetOwnProcessHandle();
+        virtmemLock();
+        MemoryBaseCodeMem = (u8*)virtmemFindCodeMemory(MemoryTotalSize, 0x1000);
+        bool ok = MemoryBaseCodeMem
+            && R_SUCCEEDED(svcMapProcessCodeMemory(self, (u64)MemoryBaseCodeMem, (u64)MemoryHeapBase, MemoryTotalSize));
+        if (ok && R_FAILED(svcSetProcessMemoryPermission(self, (u64)MemoryBaseCodeMem, MemoryTotalSize, Perm_Rw)))
+        {
+            svcUnmapProcessCodeMemory(self, (u64)MemoryBaseCodeMem, (u64)MemoryHeapBase, MemoryTotalSize);
+            ok = false;
+        }
+        if (ok)
+        {
+            // 2 x 4 GB of address space, never accessed unless mapped
+            FastMem9Start = virtmemFindAslr(AddrSpaceSize, 0x1000);
+            FastMem7Start = virtmemFindAslr(AddrSpaceSize, 0x1000);
+            if (FastMem9Start && FastMem7Start)
+            {
+                FastMem9Reservation = virtmemAddReservation(FastMem9Start, AddrSpaceSize);
+                FastMem7Reservation = virtmemAddReservation(FastMem7Start, AddrSpaceSize);
+            }
+            else
+            {
+                svcUnmapProcessCodeMemory(self, (u64)MemoryBaseCodeMem, (u64)MemoryHeapBase, MemoryTotalSize);
+                ok = false;
+            }
+        }
+        virtmemUnlock();
+        SwitchFastMemOK = ok;
+        if (ok)
+            MemoryBase = MemoryBaseCodeMem; // the heap pages are not accessible any more, use the alias
+        SwitchDbgWin9 = (u64)FastMem9Start; SwitchDbgWin7 = (u64)FastMem7Start; SwitchDbgCodeMem = (u64)MemoryBaseCodeMem;
+        if (!ok)
+        {
+            MemoryBaseCodeMem = nullptr;
+            FastMem9Start = FastMem7Start = nullptr;
+        }
+        memset(MemoryBase, 0, MemoryTotalSize);
+    }
 #elif defined(_WIN32)
     if (virtualAlloc2Ptr)
     {
@@ -863,14 +1000,27 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 
     mmap(MemoryBase, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, MemoryFile, 0);
 #endif
+#ifndef __SWITCH__
     FastMem9Start = MemoryBase+MemoryTotalSize;
     FastMem7Start = static_cast<u8*>(FastMem9Start)+AddrSpaceSize;
+#endif
 }
 
 ARMJIT_Memory::~ARMJIT_Memory() noexcept
 {
 #if defined(__SWITCH__)
-    free(MemoryBase);
+    if (MemoryBaseCodeMem)
+    {
+        virtmemLock();
+        if (FastMem9Reservation) virtmemRemoveReservation(FastMem9Reservation);
+        if (FastMem7Reservation) virtmemRemoveReservation(FastMem7Reservation);
+        virtmemUnlock();
+        FastMem9Reservation = FastMem7Reservation = nullptr;
+        svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)MemoryBaseCodeMem, (u64)MemoryHeapBase, MemoryTotalSize);
+        MemoryBaseCodeMem = nullptr;
+    }
+    free(MemoryHeapBase);
+    MemoryHeapBase = nullptr;
     MemoryBase = nullptr;
 #elif defined(_WIN32)
     if (virtualAlloc2Ptr)
