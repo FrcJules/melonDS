@@ -275,6 +275,12 @@ public:
     bool IrregularCycles = false;
 
 #ifdef __SWITCH__
+    // preferred: the same memory mapped twice (RW view + RX view), no transitions needed
+    void* JitRWBase = nullptr;
+    void* JitRWStart = nullptr;
+    void* JitRXStart = nullptr;
+    bool JitDual = false;
+    // fallback: libnx Jit (CodeMemory), RW and RX views are exclusive and must be switched
     Jit JitObj {};
     bool JitIsWritable = true;
 public:
