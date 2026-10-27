@@ -162,9 +162,17 @@ int main(int argc, char** argv)
             {
                 Result rc = clkrstSetClockRate(&cpuSession, (u32)overclockMHz * 1000000u);
                 logf("overclock %d MHz: rc=0x%x\n", overclockMHz, rc);
+                u32 applied = 0;
+                clkrstGetClockRate(&cpuSession, &applied);
+                logf("cpu clock after set: %u MHz\n", applied / 1000000);
             }
         }
     }
+
+    // temperature probe (board sensor), logged each second
+    TsSession tsSession {};
+    bool tsOk = R_SUCCEEDED(tsInitialize()) && R_SUCCEEDED(tsOpenSession(&tsSession, TsDeviceCode_LocationExternal));
+    logf("temperature sensor: %s\n", tsOk ? "ok" : "unavailable");
 
     memlog("before SDL");
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
@@ -351,7 +359,11 @@ int main(int argc, char** argv)
         if (now - secStart >= std::chrono::seconds(1))
         {
             seconds++;
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u faults=%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / 32823) : 0u, (unsigned long long)SwitchFaultCount);
+            u32 curClock = 0;
+            if (clkOk) clkrstGetClockRate(&cpuSession, &curClock);
+            float temp = 0;
+            if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u faults=%llu clk=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / 32823) : 0u, (unsigned long long)SwitchFaultCount, curClock / 1000000, temp);
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
@@ -370,6 +382,8 @@ int main(int argc, char** argv)
         if (overclockMHz > 0 && oldClock) clkrstSetClockRate(&cpuSession, oldClock);
         clkrstCloseSession(&cpuSession);
     }
+    if (tsOk) tsSessionClose(&tsSession);
+    tsExit();
     clkrstExit();
     return 0;
 }
