@@ -255,7 +255,9 @@ bool GLRenderer3D::Init()
     glEnableVertexAttribArray(2); // texcoords
     glVertexAttribIPointer(2, 2, GL_SHORT, 7*4, (void*)(3*4));
     glEnableVertexAttribArray(3); // attrib
-    glVertexAttribIPointer(3, 3, GL_UNSIGNED_INT, 7*4, (void*)(4*4));
+    // the shader input is an ivec3: WebGL2 requires the attribute type to match it (desktop OpenGL does not care);
+    // the bits are the same, only their interpretation as signed differs
+    glVertexAttribIPointer(3, 3, GL_INT, 7*4, (void*)(4*4));
 
     glGenBuffers(1, &IndexBufferID);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, IndexBufferID);
@@ -789,6 +791,10 @@ void GLRenderer3D::SetupPolygonTexture(const RendererPolygon* poly) const
     {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, poly->TexID);
+
+        // no texture bound: nothing to sample, and WebGL has no default texture to set parameters on
+        if (poly->TexID == 0)
+            return;
     }
 
     GLint repeatS, repeatT;
@@ -1212,6 +1218,18 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
     if (GPU3D.RenderDispCnt & 0x00A0) // fog/edge enabled
     {
+#ifdef MELONDS_GLES
+        // the depth buffer is sampled below: WebGL/ES forbid sampling a texture attached to the bound
+        // framebuffer (feedback loop), even with depth writes off. Depth/stencil tests are disabled here anyway.
+        // same for the attribute buffer (color attachment 1): it is detached too, even though its draw buffer is off
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 0, 0);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, 0, 0);
+        {
+            GLenum onlycolor[2] = {GL_COLOR_ATTACHMENT0, GL_NONE};
+            glDrawBuffers(2, onlycolor);
+        }
+#endif
+
         glColorMaski(0, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 
@@ -1267,6 +1285,15 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
             glDrawArrays(GL_TRIANGLES, 0, 2*3);
         }
+
+#ifdef MELONDS_GLES
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, DepthBufferTex, 0);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, AttrBufferTex, 0);
+        {
+            GLenum both[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+            glDrawBuffers(2, both);
+        }
+#endif
     }
 }
 
@@ -1382,9 +1409,14 @@ void GLRenderer3D::RenderFrame()
     ShaderConfig.uFogShift = GPU3D.RenderFogShift;
 
     glBindBuffer(GL_UNIFORM_BUFFER, ShaderConfigUBO);
+#ifdef MELONDS_GLES
+    // glMapBuffer does not exist in OpenGL ES / WebGL
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ShaderConfig), &ShaderConfig);
+#else
     void* unibuf = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
     if (unibuf) memcpy(unibuf, &ShaderConfig, sizeof(ShaderConfig));
     glUnmapBuffer(GL_UNIFORM_BUFFER);
+#endif
 
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_DEPTH_TEST);
