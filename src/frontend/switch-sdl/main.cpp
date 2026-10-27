@@ -51,6 +51,10 @@
 #include "Args.h"
 #include "NDS.h"
 #include "NDSCart.h"
+#ifdef OGLRENDERER_ENABLED
+#include "GPU_OpenGL.h"
+#endif
+#include "GPU_Soft.h"
 #include "Platform.h"
 #include "Savestate.h"
 
@@ -125,19 +129,269 @@ static u32 DSKeyForButton(int button)
 }
 
 
+
+// glColorMaskiOES (per-attachment colour masks, used by the GPU renderer) is an extension: resolved through EGL
+extern "C" void glColorMaskiOES(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
+{
+    typedef void (*Fn)(GLuint, GLboolean, GLboolean, GLboolean, GLboolean);
+    static Fn fn = nullptr;
+    static bool tried = false;
+    if (!tried)
+    {
+        tried = true;
+        fn = (Fn)SDL_GL_GetProcAddress("glColorMaskiOES");
+        if (!fn) fn = (Fn)SDL_GL_GetProcAddress("glColorMaskiEXT");
+    }
+    if (fn) fn(index, r, g, b, a);
+}
+
+// ---- drawing: everything goes through one GLES 3 context (SDL window + EGL), so that the GPU renderer and the UI share it ----
+struct GfxTex { GLuint Id = 0; int W = 0, H = 0; };
+
+struct Gfx
+{
+    SDL_Window* Window = nullptr;
+    SDL_GLContext Context = nullptr;
+    GLuint Prog = 0, ProgArray = 0, Vao = 0;
+    GLint ULoc[2][6] {};          // uRect uUV uColor uMode uTex uLayer, per program
+    float R = 0, G = 0, B = 0, A = 1;
+    bool Blend = false;
+    bool Linear = false;
+};
+
+static const char* GfxVS = R"(#version 300 es
+precision highp float;
+uniform vec4 uRect;
+uniform vec4 uUV;
+out vec2 vUV;
+void main()
+{
+    vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+    vUV = mix(uUV.xy, uUV.zw, p);
+    vec2 px = uRect.xy + p * uRect.zw;
+    gl_Position = vec4(px.x / 640.0 - 1.0, 1.0 - px.y / 360.0, 0.0, 1.0);
+}
+)";
+
+static const char* GfxFS = R"(#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform vec4 uColor;
+uniform int uMode;
+uniform sampler2D uTex;
+in vec2 vUV;
+out vec4 oColor;
+void main()
+{
+    if (uMode == 0) oColor = uColor;                              // flat colour
+    else if (uMode == 1) oColor = vec4(texture(uTex, vUV).bgr, 1.0); // DS software frame (ARGB in memory = BGRA bytes)
+    else oColor = texture(uTex, vUV);                              // text (RGBA)
+}
+)";
+
+static const char* GfxFSArray = R"(#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+uniform sampler2DArray uTex;
+uniform float uLayer;
+in vec2 vUV;
+out vec4 oColor;
+void main()
+{
+    oColor = vec4(texture(uTex, vec3(vUV, uLayer)).rgb, 1.0);
+}
+)";
+
+static GLuint GfxCompile(GLenum type, const char* src, const std::function<void(const std::string&)>& say)
+{
+    GLuint sh = glCreateShader(type);
+    glShaderSource(sh, 1, &src, nullptr);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok)
+    {
+        char log[1024];
+        glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+        say(std::string("shader error: ") + log);
+        return 0;
+    }
+    return sh;
+}
+
+static GLuint GfxLink(const char* vs, const char* fs, const std::function<void(const std::string&)>& say)
+{
+    GLuint v = GfxCompile(GL_VERTEX_SHADER, vs, say), f = GfxCompile(GL_FRAGMENT_SHADER, fs, say);
+    if (!v || !f) return 0;
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) { say("program link error"); return 0; }
+    return p;
+}
+
+static bool GfxInit(Gfx* g, const std::function<void(const std::string&)>& say)
+{
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    g->Window = SDL_CreateWindow("melonDS", 0, 0, 1280, 720, SDL_WINDOW_OPENGL);
+    if (!g->Window) { say(std::string("window: ") + SDL_GetError()); return false; }
+    g->Context = SDL_GL_CreateContext(g->Window);
+    if (!g->Context) { say(std::string("GL context: ") + SDL_GetError()); return false; }
+    SDL_GL_SetSwapInterval(1);
+    say(std::string("GL: ") + (const char*)glGetString(GL_VERSION) + " / " + (const char*)glGetString(GL_RENDERER));
+
+    g->Prog = GfxLink(GfxVS, GfxFS, say);
+    g->ProgArray = GfxLink(GfxVS, GfxFSArray, say);
+    if (!g->Prog || !g->ProgArray) return false;
+    const char* names[6] = {"uRect", "uUV", "uColor", "uMode", "uTex", "uLayer"};
+    GLuint progs[2] = {g->Prog, g->ProgArray};
+    for (int i = 0; i < 2; i++)
+        for (int k = 0; k < 6; k++)
+            g->ULoc[i][k] = glGetUniformLocation(progs[i], names[k]);
+    glGenVertexArrays(1, &g->Vao);
+    glBindVertexArray(g->Vao);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    return true;
+}
+
+static void GfxResetState(Gfx* g)
+{
+    // the GPU renderer leaves its own state behind
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 1280, 720);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBindVertexArray(g->Vao);
+    if (g->Blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    else glDisable(GL_BLEND);
+}
+
+static void GfxClear(Gfx* g)
+{
+    GfxResetState(g);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+static void GfxColor(Gfx* g, int r, int gr, int b, int a) { g->R = r / 255.f; g->G = gr / 255.f; g->B = b / 255.f; g->A = a / 255.f; }
+
+static void GfxBlendMode(Gfx* g, bool on)
+{
+    g->Blend = on;
+    if (on) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    else glDisable(GL_BLEND);
+}
+
+static void GfxFill(Gfx* g, const SDL_Rect* r)
+{
+    glUseProgram(g->Prog);
+    glUniform4f(g->ULoc[0][0], (float)r->x, (float)r->y, (float)r->w, (float)r->h);
+    glUniform4f(g->ULoc[0][1], 0, 0, 1, 1);
+    glUniform4f(g->ULoc[0][2], g->R, g->G, g->B, g->A);
+    glUniform1i(g->ULoc[0][3], 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// mode 1 = DS software frame, 2 = RGBA texture (text); src in texels (null = whole texture)
+static void GfxCopy(Gfx* g, const GfxTex* t, const SDL_Rect* src, const SDL_Rect* dst, int mode)
+{
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+    if (src) { u0 = (float)src->x / t->W; v0 = (float)src->y / t->H; u1 = (float)(src->x + src->w) / t->W; v1 = (float)(src->y + src->h) / t->H; }
+    glUseProgram(g->Prog);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, t->Id);
+    glUniform1i(g->ULoc[0][4], 0);
+    glUniform4f(g->ULoc[0][0], (float)dst->x, (float)dst->y, (float)dst->w, (float)dst->h);
+    glUniform4f(g->ULoc[0][1], u0, v0, u1, v1);
+    glUniform1i(g->ULoc[0][3], mode);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+// one layer (= one screen) of the GPU renderer's output texture array
+static void GfxCopyArray(Gfx* g, GLuint tex, int layer, const SDL_Rect* dst, bool linear)
+{
+    glUseProgram(g->ProgArray);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+    glUniform1i(g->ULoc[1][4], 0);
+    glUniform1f(g->ULoc[1][5], (float)layer);
+    glUniform4f(g->ULoc[1][0], (float)dst->x, (float)dst->y, (float)dst->w, (float)dst->h);
+    glUniform4f(g->ULoc[1][1], 0, 0, 1, 1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+static void GfxTexParams(const GfxTex* t, bool linear)
+{
+    glBindTexture(GL_TEXTURE_2D, t->Id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, linear ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+static GfxTex GfxTexCreate(int w, int h, bool linear)
+{
+    GfxTex t;
+    t.W = w; t.H = h;
+    glGenTextures(1, &t.Id);
+    glBindTexture(GL_TEXTURE_2D, t.Id);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    GfxTexParams(&t, linear);
+    return t;
+}
+
+static void GfxTexDestroy(GfxTex* t)
+{
+    if (t->Id) glDeleteTextures(1, &t->Id);
+    *t = GfxTex();
+}
+
+// RGBA texture from an SDL surface (text)
+static GfxTex GfxTexFromSurface(SDL_Surface* surf)
+{
+    GfxTex t;
+    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);   // bytes R,G,B,A
+    if (!rgba) return t;
+    t.W = rgba->w; t.H = rgba->h;
+    glGenTextures(1, &t.Id);
+    glBindTexture(GL_TEXTURE_2D, t.Id);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, rgba->pitch / 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t.W, t.H, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    GfxTexParams(&t, true);
+    SDL_FreeSurface(rgba);
+    return t;
+}
+
+static void GfxPresent(Gfx* g) { SDL_GL_SwapWindow(g->Window); }
+
 // ---- minimal UI: text with the console's shared font, ROM browser ----
 static TTF_Font* UIFont = nullptr;
 static const SDL_Color White {240, 240, 240, 255}, Grey {150, 160, 175, 255}, Accent {120, 210, 255, 255};
 
-static void DrawText(SDL_Renderer* r, const std::string& text, int x, int y, SDL_Color c)
+static void DrawText(Gfx* r, const std::string& text, int x, int y, SDL_Color c)
 {
     if (!UIFont || text.empty()) return;
     SDL_Surface* surf = TTF_RenderUTF8_Blended(UIFont, text.c_str(), c);
     if (!surf) return;
-    SDL_Texture* t = SDL_CreateTextureFromSurface(r, surf);
+    GfxTex t = GfxTexFromSurface(surf);
     SDL_Rect d {x, y, surf->w, surf->h};
-    if (t) SDL_RenderCopy(r, t, nullptr, &d);
-    SDL_DestroyTexture(t);
+    bool wasBlend = r->Blend;
+    GfxBlendMode(r, true);
+    if (t.Id) GfxCopy(r, &t, nullptr, &d, 2);
+    GfxBlendMode(r, wasBlend);
+    GfxTexDestroy(&t);
     SDL_FreeSurface(surf);
 }
 
@@ -166,7 +420,7 @@ static std::string LowerCase(std::string s)
 }
 
 // returns the chosen .nds path, or "" if the user quit (PLUS)
-static std::string BrowseRom(SDL_Renderer* r, std::string dir)
+static std::string BrowseRom(Gfx* r, std::string dir)
 {
     struct Entry { std::string name; bool isDir; };
     std::vector<Entry> entries;
@@ -207,8 +461,9 @@ static std::string BrowseRom(SDL_Renderer* r, std::string dir)
 
     while (appletMainLoop())
     {
-        SDL_SetRenderDrawColor(r, 18, 22, 30, 255);
-        SDL_RenderClear(r);
+        GfxClear(r);
+        GfxColor(r, 18, 22, 30, 255);
+        { SDL_Rect bg {0, 0, 1280, 720}; GfxFill(r, &bg); }
         DrawText(r, "Choisir une ROM", 60, 24, Accent);
         DrawText(r, dir, 60, 66, Grey);
         for (int i = 0; i < rows && top + i < (int)entries.size(); i++)
@@ -217,15 +472,15 @@ static std::string BrowseRom(SDL_Renderer* r, std::string dir)
             int y = 120 + i * 36;
             if (top + i == sel)
             {
-                SDL_SetRenderDrawColor(r, 40, 70, 110, 255);
+                GfxColor(r, 40, 70, 110, 255);
                 SDL_Rect bar {40, y - 2, 1200, 36};
-                SDL_RenderFillRect(r, &bar);
+                GfxFill(r, &bar);
             }
             DrawText(r, (e.isDir ? "[dossier]  " : "") + e.name, 60, y, top + i == sel ? White : Grey);
         }
         if (entries.empty()) DrawText(r, "(aucune ROM .nds ici)", 60, 120, Grey);
         DrawText(r, "A : choisir     B : dossier parent     +/- : quitter", 60, 656, Grey);
-        SDL_RenderPresent(r);
+        GfxPresent(r);
 
         SDL_Event ev;
         if (!SDL_WaitEventTimeout(&ev, 200) || ev.type != SDL_JOYBUTTONDOWN) continue;
@@ -368,6 +623,9 @@ int main(int argc, char** argv)
     int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 0);
     bool autoClock = overclockMHz == 0 && !cfg.count("overclock");
     if (autoClock) overclockMHz = 1224;
+    // 3D renderer: software (default) or the GLES 3 renderer on the console's GPU (config gpu=0|1, menu, ui.txt)
+    bool useGpu = cfg.count("gpu") ? cfg["gpu"] == "1" : (ui0.count("gpu") && ui0["gpu"] == "1");
+    const int gpuScale = cfg.count("gpuscale") ? std::clamp(atoi(cfg["gpuscale"].c_str()), 1, 4) : 1;
     bool threaded3d = cfg.count("threaded3d") ? cfg["threaded3d"] == "1" : (ui0.count("threaded") ? ui0["threaded"] == "1" : true);
     if (R_SUCCEEDED(clkrstInitialize()))
     {
@@ -399,9 +657,14 @@ int main(int argc, char** argv)
 
     memlog("before SDL");
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
-    SDL_Window* window = SDL_CreateWindow("melonDS", 0, 0, 1280, 720, 0);
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    SDL_Texture* tex = nullptr;
+    Gfx gfx;
+    if (!GfxInit(&gfx, [&](const std::string& m) { logf("%s\n", m.c_str()); }))
+    {
+        logf("cannot create the GL context, giving up\n");
+        return 1;
+    }
+    Gfx* renderer = &gfx;
+    GfxTex tex;
     std::vector<SDL_Joystick*> joysticks;
     for (int i = 0; i < SDL_NumJoysticks(); i++)
         joysticks.push_back(SDL_JoystickOpen(i));
@@ -423,14 +686,13 @@ int main(int argc, char** argv)
     auto saveUi = [&]() {
         FILE* f = fopen((std::string(ConfigDir) + "/ui.txt").c_str(), "w");
         if (!f) return;
-        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\n", layout, filter, showFps ? 1 : 0, autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0);
+        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\ngpu=%d\n", layout, filter, showFps ? 1 : 0, autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0, useGpu ? 1 : 0);
         fclose(f);
     };
 
     auto makeTexture = [&]() {
-        if (tex) SDL_DestroyTexture(tex);
-        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, filter ? "1" : "0");
-        tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
+        if (tex.Id) GfxTexParams(&tex, filter != 0);
+        else tex = GfxTexCreate(256, 384, filter != 0);
     };
 
     // which ROM: rom= in config.txt wins, else the last one chosen (lastrom.txt); the browser opens if none, or with --browse
@@ -537,15 +799,45 @@ int main(int argc, char** argv)
     nds->Reset();
     DebugStage = 12;
 
-    // software renderer on its own thread (3 cores are available to homebrew)
-    if (threaded3d)
-    {
-        RendererSettings rendererSettings {};
-        rendererSettings.ScaleFactor = 1;
-        rendererSettings.Threaded = true;
-        nds->GetRenderer().SetRenderSettings(rendererSettings);
-        logf("threaded 3D renderer enabled\n");
-    }
+    // 3D renderer: software (optionally on its own thread: 3 cores are available to homebrew) or GLES 3 on the GPU
+    auto applyRenderer = [&](bool gpu) -> bool {
+#ifdef OGLRENDERER_ENABLED
+        if (gpu)
+        {
+            nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
+            RendererSettings rs {};
+            rs.ScaleFactor = gpuScale;
+            rs.Threaded = false;
+            rs.HiresCoordinates = true;
+            rs.BetterPolygons = false;
+            nds->GetRenderer().SetRenderSettings(rs);
+            int current = 0, count = 0;
+            while (nds->GetRenderer().NeedsShaderCompile())
+                nds->GetRenderer().ShaderCompileStep(current, count);
+            logf("GPU renderer (GLES 3) enabled, scale %d\n", gpuScale);
+            return true;
+        }
+#endif
+        if (gpu)
+        {
+            logf("this build has no GPU renderer\n");
+            return false;
+        }
+        nds->SetRenderer(std::make_unique<SoftRenderer>(*nds));
+        if (threaded3d)
+        {
+            RendererSettings rs {};
+            rs.ScaleFactor = 1;
+            rs.Threaded = true;
+            nds->GetRenderer().SetRenderSettings(rs);
+            logf("threaded 3D renderer enabled\n");
+        }
+        return true;
+    };
+    if (useGpu && !applyRenderer(true))
+        useGpu = false;
+    else if (!useGpu && threaded3d)
+        applyRenderer(false);
 
     DebugStage = 13;
     nds->SetupDirectBoot(romPath);
@@ -562,8 +854,7 @@ int main(int argc, char** argv)
         else { topR = {400, 0, 480, 360}; botR = {400, 360, 480, 360}; }
     };
     computeLayout();
-    SDL_Texture* fpsTex = nullptr;
-    int fpsW = 0, fpsH = 0;
+    GfxTex fpsTex;
     bool relaunch = false;
 
     // save states
@@ -614,10 +905,17 @@ int main(int argc, char** argv)
     auto fbUntil = std::chrono::steady_clock::now();
     auto feedback = [&](u8 r, u8 g, u8 b, int sl) { fbR = r; fbG = g; fbB = b; fbSlot = sl; fbUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000); };
 
+    GLuint gpuTex = 0;   // output texture array of the GPU renderer (layer 0 = top screen, 1 = bottom)
     auto drawScreens = [&]() {
+        if (gpuTex)
+        {
+            GfxCopyArray(renderer, gpuTex, 0, &topR, filter != 0);
+            GfxCopyArray(renderer, gpuTex, 1, &botR, filter != 0);
+            return;
+        }
         SDL_Rect srcTop {0, 0, 256, 192}, srcBot {0, 192, 256, 192};
-        SDL_RenderCopy(renderer, tex, &srcTop, &topR);
-        SDL_RenderCopy(renderer, tex, &srcBot, &botR);
+        GfxCopy(renderer, &tex, &srcTop, &topR, 1);
+        GfxCopy(renderer, &tex, &srcBot, &botR, 1);
     };
 
     // in-game menu (ZL + ZR + PLUS): emulation is paused. Returns 0 = resume, 1 = change ROM, 2 = quit
@@ -625,20 +923,19 @@ int main(int argc, char** argv)
         if (audio) SDL_PauseAudioDevice(audio, 1);
         const int prevStage = DebugStage;
         DebugStage = 99;   // paused: the watchdog must not report a hang
-        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Fréquence CPU", "3D en thread séparé", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
-        const int count = 11;
+        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Fréquence CPU", "Rendu 3D", "3D en thread séparé", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
+        const int count = 12;
         int sel = 0, result = -1;
         std::string note;
         while (result < 0 && appletMainLoop())
         {
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
+            GfxClear(renderer);
             drawScreens();
-            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(renderer, 10, 14, 22, 215);
+            GfxBlendMode(renderer, true);
+            GfxColor(renderer, 10, 14, 22, 215);
             SDL_Rect full {0, 0, 1280, 720};
-            SDL_RenderFillRect(renderer, &full);
-            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+            GfxFill(renderer, &full);
+            GfxBlendMode(renderer, false);
             DrawText(renderer, "Menu", 420, 40, Accent);
             for (int i = 0; i < count; i++)
             {
@@ -647,20 +944,21 @@ int main(int argc, char** argv)
                 if (i == 2) label += std::string(" : ") + (filter ? "lissé" : "pixels nets");
                 if (i == 3) label += std::string(" : ") + (showFps ? "oui" : "non");
                 if (i == 4) label += autoClock ? " : auto (" + std::to_string(overclockMHz) + " MHz)" : " : " + std::to_string(overclockMHz) + " MHz";
-                if (i == 5) label += std::string(" : ") + (threaded3d ? "oui" : "non");
-                if (i == 6) label += " : " + std::to_string(slot);
-                int y = 90 + i * 46;
+                if (i == 5) label += std::string(" : ") + (useGpu ? "GPU (GLES 3)" : "logiciel");
+                if (i == 6) label += std::string(" : ") + (threaded3d ? "oui (logiciel)" : "non");
+                if (i == 7) label += " : " + std::to_string(slot);
+                int y = 90 + i * 43;
                 if (i == sel)
                 {
-                    SDL_SetRenderDrawColor(renderer, 40, 70, 110, 255);
-                    SDL_Rect bar {400, y - 4, 480, 42};
-                    SDL_RenderFillRect(renderer, &bar);
+                    GfxColor(renderer, 40, 70, 110, 255);
+                    SDL_Rect bar {400, y - 4, 480, 40};
+                    GfxFill(renderer, &bar);
                 }
                 DrawText(renderer, label, 420, y, i == sel ? White : Grey);
             }
-            if (!note.empty()) DrawText(renderer, note, 420, 90 + count * 46 + 8, Accent);
+            if (!note.empty()) DrawText(renderer, note, 420, 90 + count * 43 + 8, Accent);
             DrawText(renderer, "A : valider   gauche/droite : changer   B : retour", 330, 672, Grey);
-            SDL_RenderPresent(renderer);
+            GfxPresent(renderer);
 
             SDL_Event ev;
             if (!SDL_WaitEventTimeout(&ev, 200) || ev.type != SDL_JOYBUTTONDOWN) continue;
@@ -694,19 +992,25 @@ int main(int argc, char** argv)
                 }
                 case 5:
                 {
-                    threaded3d = !threaded3d;
-                    RendererSettings rs {};
-                    rs.ScaleFactor = 1;
-                    rs.Threaded = threaded3d;
-                    nds->GetRenderer().SetRenderSettings(rs);
+                    bool want = !useGpu;
+                    if (applyRenderer(want)) useGpu = want;
+                    else applyRenderer(useGpu);
+                    gpuTex = 0;
                     saveUi();
                     break;
                 }
-                case 6: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
-                case 7: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
-                case 8: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
-                case 9: if (act) result = 1; break;
-                case 10: if (act) result = 2; break;
+                case 6:
+                {
+                    threaded3d = !threaded3d;
+                    if (!useGpu) applyRenderer(false);
+                    saveUi();
+                    break;
+                }
+                case 7: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
+                case 8: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
+                case 9: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
+                case 10: if (act) result = 1; break;
+                case 11: if (act) result = 2; break;
                 }
             }
         }
@@ -808,39 +1112,36 @@ int main(int argc, char** argv)
         DebugStage = 3;
 
         void *top, *bottom;
-        if (nds->GPU.GetFramebuffers(&top, &bottom))
-        {
-            u8* pixels; int pitch;
-            if (SDL_LockTexture(tex, nullptr, (void**)&pixels, &pitch) == 0)
-            {
-                for (int y = 0; y < 192; y++)
-                {
-                    memcpy(pixels + y * pitch, (u8*)top + y * 256 * 4, 256 * 4);
-                    memcpy(pixels + (y + 192) * pitch, (u8*)bottom + y * 256 * 4, 256 * 4);
-                }
-                SDL_UnlockTexture(tex);
-            }
-        }
+        bool softFrame = nds->GPU.GetFramebuffers(&top, &bottom);   // true = software framebuffers, false = GPU renderer texture
         DebugStage = 4;
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        drawScreens();
-        if (showFps && fpsTex)
+        GfxClear(renderer);
+        if (softFrame)
         {
-            SDL_Rect d {1280 - fpsW - 16, 8, fpsW, fpsH};
-            SDL_RenderCopy(renderer, fpsTex, nullptr, &d);
+            glBindTexture(GL_TEXTURE_2D, tex.Id);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, top);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 192, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, bottom);
+            gpuTex = 0;
+        }
+        else if (top)
+            gpuTex = *(GLuint*)top;
+        drawScreens();
+        if (showFps && fpsTex.Id)
+        {
+            SDL_Rect d {1280 - fpsTex.W - 16, 8, fpsTex.W, fpsTex.H};
+            GfxBlendMode(renderer, true);
+            GfxCopy(renderer, &fpsTex, nullptr, &d, 2);
+            GfxBlendMode(renderer, false);
         }
         if (clock::now() < fbUntil)
         {
-            SDL_SetRenderDrawColor(renderer, fbR, fbG, fbB, 255);
+            GfxColor(renderer, fbR, fbG, fbB, 255);
             for (int i = 0; i < std::max(fbSlot, 1); i++)
             {
                 SDL_Rect r {40 + i * 48, 40, fbSlot == 0 ? 16 : 36, 36};
-                SDL_RenderFillRect(renderer, &r);
+                GfxFill(renderer, &r);
             }
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         }
-        SDL_RenderPresent(renderer);
+        GfxPresent(renderer);
 
         DebugStage = 5;
         // drain the SPU every frame. The DS runs at 59.83 fps and the display at 60: instead of dropping audio
@@ -876,12 +1177,10 @@ int main(int argc, char** argv)
             {
                 char buf[32];
                 snprintf(buf, sizeof(buf), "%d fps", frames);
-                if (fpsTex) SDL_DestroyTexture(fpsTex);
-                fpsTex = nullptr;
+                GfxTexDestroy(&fpsTex);
                 if (SDL_Surface* sf = TTF_RenderUTF8_Blended(UIFont, buf, SDL_Color {120, 255, 140, 255}))
                 {
-                    fpsTex = SDL_CreateTextureFromSurface(renderer, sf);
-                    fpsW = sf->w; fpsH = sf->h;
+                    fpsTex = GfxTexFromSurface(sf);
                     SDL_FreeSurface(sf);
                 }
             }
@@ -917,17 +1216,17 @@ int main(int argc, char** argv)
     if (audio) SDL_CloseAudioDevice(audio);
     for (SDL_Joystick* j : joysticks)
         if (j) SDL_JoystickClose(j);
-    if (fpsTex) SDL_DestroyTexture(fpsTex);
+    GfxTexDestroy(&fpsTex);
     if (UIFont) TTF_CloseFont(UIFont);
     TTF_Quit();
     logf("exit step 1\n");
     plExit();
     logf("exit step 2\n");
-    SDL_DestroyTexture(tex);
+    GfxTexDestroy(&tex);
     logf("exit step 3\n");
-    SDL_DestroyRenderer(renderer);
+    SDL_GL_DeleteContext(gfx.Context);
     logf("exit step 4\n");
-    SDL_DestroyWindow(window);
+    SDL_DestroyWindow(gfx.Window);
     logf("exit step 5\n");
     SDL_Quit();
     logf("exit step 6\n");
