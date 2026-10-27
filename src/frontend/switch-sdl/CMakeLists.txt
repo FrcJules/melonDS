@@ -11,7 +11,7 @@ add_executable(melonDS-switch
 )
 
 target_include_directories(melonDS-switch PRIVATE ${SDL2_INCLUDE_DIRS})
-target_link_libraries(melonDS-switch PRIVATE core Threads::Threads SDL2_ttf freetype harfbuzz png16 bz2 z ${SDL2_LIBRARIES} nx)
+target_link_libraries(melonDS-switch PRIVATE core Threads::Threads SDL2_ttf freetype harfbuzz png16 bz2 z ${SDL2_LIBRARIES} EGL GLESv2 glapi drm_nouveau nx)
 
 # .nro (needs devkitPro: nacptool, elf2nro)
 find_program(NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin)

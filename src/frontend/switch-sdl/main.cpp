@@ -35,6 +35,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -44,6 +45,7 @@
 
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <GLES3/gl3.h>
 #include <switch.h>
 
 #include "Args.h"
@@ -269,6 +271,56 @@ static std::string BrowseRom(SDL_Renderer* r, std::string dir)
     return "";
 }
 
+
+// Probe of the GLES3 stack (config gltest=1): context version, extensions, swap rate. Writes to the log and exits.
+static int GlProbe(std::function<void(const std::string&)> say)
+{
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_Window* win = nullptr;
+    SDL_GLContext ctx = nullptr;
+    int tryVersions[][2] = {{3, 2}, {3, 1}, {3, 0}};
+    for (auto& v : tryVersions)
+    {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, v[0]);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, v[1]);
+        win = SDL_CreateWindow("gl", 0, 0, 1280, 720, SDL_WINDOW_OPENGL);
+        if (!win) { say(std::string("window failed: ") + SDL_GetError()); continue; }
+        ctx = SDL_GL_CreateContext(win);
+        say("context ES " + std::to_string(v[0]) + "." + std::to_string(v[1]) + ": " + (ctx ? "ok" : std::string("FAILED ") + SDL_GetError()));
+        if (ctx) break;
+        SDL_DestroyWindow(win);
+        win = nullptr;
+    }
+    if (!ctx) return 1;
+    auto str = [](GLenum e) { const GLubyte* g = glGetString(e); return std::string(g ? (const char*)g : "(null)"); };
+    say("GL_VERSION: " + str(GL_VERSION));
+    say("GL_RENDERER: " + str(GL_RENDERER));
+    say("GL_VENDOR: " + str(GL_VENDOR));
+    say("GLSL: " + str(GL_SHADING_LANGUAGE_VERSION));
+    std::string ext = str(GL_EXTENSIONS);
+    for (const char* e : {"GL_OES_draw_buffers_indexed", "GL_EXT_draw_buffers_indexed", "GL_EXT_color_buffer_float", "GL_OES_texture_float", "GL_EXT_texture_border_clamp", "GL_OES_texture_border_clamp", "GL_EXT_shader_framebuffer_fetch", "GL_NV_framebuffer_blit", "GL_OES_texture_stencil8"})
+        say(std::string(e) + ": " + (ext.find(e) != std::string::npos ? "yes" : "no"));
+    GLint v = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &v); say("max texture " + std::to_string(v));
+    glGetIntegerv(GL_MAX_DRAW_BUFFERS, &v); say("max draw buffers " + std::to_string(v));
+    glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS, &v); say("max UBO bindings " + std::to_string(v));
+    SDL_GL_SetSwapInterval(1);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 180; i++)
+    {
+        glClearColor((i % 60) / 60.f, 0.3f, 0.5f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        SDL_GL_SwapWindow(win);
+    }
+    double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    say("180 swaps in " + std::to_string(sec) + " s = " + std::to_string(180 / sec) + " fps");
+    glGetError();
+    SDL_GL_DeleteContext(ctx);
+    SDL_DestroyWindow(win);
+    return 0;
+}
+
 static void MemLog(const char* label)
 {
     u64 total = 0, used = 0;
@@ -294,6 +346,13 @@ int main(int argc, char** argv)
     };
 
     auto cfg = ReadConfig();
+    if (cfg.count("gltest") && cfg["gltest"] == "1")
+    {
+        logf("=== gl probe ===\n");
+        int rc = GlProbe([&](const std::string& m) { logf("%s\n", m.c_str()); });
+        logf("=== gl probe done rc=%d ===\n", rc);
+        return rc;
+    }
     if (cfg.count("helpercore")) Platform::SwitchHelperCore = atoi(cfg["helpercore"].c_str());
     // defaults (best measured setup); config.txt overrides, then ui.txt (menu), then the defaults below
     auto ui0 = ReadConfig("ui.txt");
