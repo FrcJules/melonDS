@@ -110,3 +110,8 @@ add_subdirectory(src)
 if (BUILD_QT_SDL)
     add_subdirectory(src/frontend/qt_sdl)
 endif()
+
+option(BUILD_SWITCH_SDL "Build the Nintendo Switch SDL2 frontend (devkitPro)" OFF)
+if (BUILD_SWITCH_SDL)
+    add_subdirectory(src/frontend/switch-sdl)
+endif()
