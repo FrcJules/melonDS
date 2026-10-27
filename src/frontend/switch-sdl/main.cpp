@@ -335,7 +335,7 @@ int main(int argc, char** argv)
         SDL_RenderPresent(renderer);
 
         DebugStage = 5;
-        // drain the SPU every frame; drop audio if the device falls too far behind
+        // drain the SPU every frame; keep about 150 ms of audio queued, drop the rest (low latency)
         for (;;)
         {
             int avail = nds->SPU.GetOutputSize();
@@ -343,7 +343,7 @@ int main(int argc, char** argv)
             int n = std::min(avail, (int)(audioBuf.size() / 2));
             n = nds->SPU.ReadOutput(audioBuf.data(), n);
             if (n <= 0) break;
-            if (audio && SDL_GetQueuedAudioSize(audio) < 32823 * 4 / 2)
+            if (audio && SDL_GetQueuedAudioSize(audio) < 32823 * 4 * 150 / 1000)
                 SDL_QueueAudio(audio, audioBuf.data(), n * 2 * sizeof(s16));
         }
 
@@ -351,7 +351,7 @@ int main(int argc, char** argv)
         if (now - secStart >= std::chrono::seconds(1))
         {
             seconds++;
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000));
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u faults=%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / 32823) : 0u, (unsigned long long)SwitchFaultCount);
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
