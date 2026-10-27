@@ -45,7 +45,7 @@
 using namespace melonDS;
 
 extern std::string SwitchSavePath;
-extern FILE* SwitchLogFile;
+extern std::string SwitchLogPath;
 
 static const char* ConfigDir = "sdmc:/switch/melonds-fork";
 
@@ -104,11 +104,13 @@ static u32 DSKeyForButton(int button)
 int main(int argc, char** argv)
 {
     mkdir(ConfigDir, 0777);
-    SwitchLogFile = fopen((std::string(ConfigDir) + "/log.txt").c_str(), "a");
+    SwitchLogPath = std::string(ConfigDir) + "/log.txt";
+    // the file is closed after every line: FAT only records its size on close, and the log must be readable while the app runs
     auto logf = [](const char* fmt, auto... a) {
-        if (!SwitchLogFile) return;
-        fprintf(SwitchLogFile, fmt, a...);
-        fflush(SwitchLogFile);
+        FILE* f = fopen(SwitchLogPath.c_str(), "a");
+        if (!f) return;
+        fprintf(f, fmt, a...);
+        fclose(f);
     };
 
     auto cfg = ReadConfig();
@@ -298,6 +300,5 @@ int main(int argc, char** argv)
         clkrstCloseSession(&cpuSession);
     }
     clkrstExit();
-    if (SwitchLogFile) fclose(SwitchLogFile);
     return 0;
 }

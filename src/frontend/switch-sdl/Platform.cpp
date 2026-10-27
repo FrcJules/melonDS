@@ -34,7 +34,7 @@
 #include "Platform.h"
 
 std::string SwitchSavePath;
-FILE* SwitchLogFile = nullptr;
+std::string SwitchLogPath;
 
 namespace melonDS::Platform
 {
@@ -195,14 +195,18 @@ u64 FileLength(FileHandle* file)
 void Log(LogLevel level, const char* fmt, ...)
 {
     // only warnings and errors, they go to the log file (stderr is not visible on the console)
-    if (level < LogLevel::Warn || !SwitchLogFile)
+    if (level < LogLevel::Warn || SwitchLogPath.empty())
+        return;
+
+    FILE* file = fopen(SwitchLogPath.c_str(), "a");
+    if (!file)
         return;
 
     va_list args;
     va_start(args, fmt);
-    vfprintf(SwitchLogFile, fmt, args);
+    vfprintf(file, fmt, args);
     va_end(args);
-    fflush(SwitchLogFile);
+    fclose(file);
 }
 
 
