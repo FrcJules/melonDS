@@ -169,6 +169,11 @@ int main(int argc, char** argv)
         }
     }
 
+    // memory and GPU clocks, to see what else changes with the CPU clock
+    ClkrstSession emcSession {}, gpuSession {};
+    bool emcOk = clkOk && R_SUCCEEDED(clkrstOpenSession(&emcSession, PcvModuleId_EMC, 3));
+    bool gpuOk = clkOk && R_SUCCEEDED(clkrstOpenSession(&gpuSession, PcvModuleId_GPU, 3));
+
     // temperature probe (board sensor), logged each second
     TsSession tsSession {};
     bool tsOk = R_SUCCEEDED(tsInitialize()) && R_SUCCEEDED(tsOpenSession(&tsSession, TsDeviceCode_LocationExternal));
@@ -361,9 +366,12 @@ int main(int argc, char** argv)
             seconds++;
             u32 curClock = 0;
             if (clkOk) clkrstGetClockRate(&cpuSession, &curClock);
+            u32 emcClock = 0, gpuClock = 0;
+            if (emcOk) clkrstGetClockRate(&emcSession, &emcClock);
+            if (gpuOk) clkrstGetClockRate(&gpuSession, &gpuClock);
             float temp = 0;
             if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u faults=%llu clk=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / 32823) : 0u, (unsigned long long)SwitchFaultCount, curClock / 1000000, temp);
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / 32823) : 0u, (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
@@ -382,6 +390,8 @@ int main(int argc, char** argv)
         if (overclockMHz > 0 && oldClock) clkrstSetClockRate(&cpuSession, oldClock);
         clkrstCloseSession(&cpuSession);
     }
+    if (emcOk) clkrstCloseSession(&emcSession);
+    if (gpuOk) clkrstCloseSession(&gpuSession);
     if (tsOk) tsSessionClose(&tsSession);
     tsExit();
     clkrstExit();
