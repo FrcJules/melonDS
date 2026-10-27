@@ -625,7 +625,7 @@ int main(int argc, char** argv)
     if (autoClock) overclockMHz = 1224;
     // 3D renderer: software (default) or the GLES 3 renderer on the console's GPU (config gpu=0|1, menu, ui.txt)
     bool useGpu = cfg.count("gpu") ? cfg["gpu"] == "1" : (ui0.count("gpu") && ui0["gpu"] == "1");
-    const int gpuScale = cfg.count("gpuscale") ? std::clamp(atoi(cfg["gpuscale"].c_str()), 1, 4) : 1;
+    int gpuScale = std::clamp(cfg.count("gpuscale") ? atoi(cfg["gpuscale"].c_str()) : (ui0.count("gpuscale") ? atoi(ui0["gpuscale"].c_str()) : 2), 1, 3);
     bool threaded3d = cfg.count("threaded3d") ? cfg["threaded3d"] == "1" : (ui0.count("threaded") ? ui0["threaded"] == "1" : true);
     if (R_SUCCEEDED(clkrstInitialize()))
     {
@@ -686,7 +686,7 @@ int main(int argc, char** argv)
     auto saveUi = [&]() {
         FILE* f = fopen((std::string(ConfigDir) + "/ui.txt").c_str(), "w");
         if (!f) return;
-        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\ngpu=%d\n", layout, filter, showFps ? 1 : 0, autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0, useGpu ? 1 : 0);
+        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\ngpu=%d\ngpuscale=%d\n", layout, filter, showFps ? 1 : 0, autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0, useGpu ? 1 : 0, gpuScale);
         fclose(f);
     };
 
@@ -923,8 +923,8 @@ int main(int argc, char** argv)
         if (audio) SDL_PauseAudioDevice(audio, 1);
         const int prevStage = DebugStage;
         DebugStage = 99;   // paused: the watchdog must not report a hang
-        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Fréquence CPU", "Rendu 3D", "3D en thread séparé", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
-        const int count = 12;
+        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Fréquence CPU", "Rendu 3D", "Résolution GPU", "3D en thread séparé", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
+        const int count = 13;
         int sel = 0, result = -1;
         std::string note;
         while (result < 0 && appletMainLoop())
@@ -945,18 +945,19 @@ int main(int argc, char** argv)
                 if (i == 3) label += std::string(" : ") + (showFps ? "oui" : "non");
                 if (i == 4) label += autoClock ? " : auto (" + std::to_string(overclockMHz) + " MHz)" : " : " + std::to_string(overclockMHz) + " MHz";
                 if (i == 5) label += std::string(" : ") + (useGpu ? "GPU (GLES 3)" : "logiciel");
-                if (i == 6) label += std::string(" : ") + (threaded3d ? "oui (logiciel)" : "non");
-                if (i == 7) label += " : " + std::to_string(slot);
-                int y = 90 + i * 43;
+                if (i == 6) label += " : " + std::to_string(gpuScale) + "x" + (useGpu ? "" : " (rendu GPU seulement)");
+                if (i == 7) label += std::string(" : ") + (threaded3d ? "oui (logiciel)" : "non");
+                if (i == 8) label += " : " + std::to_string(slot);
+                int y = 86 + i * 40;
                 if (i == sel)
                 {
                     GfxColor(renderer, 40, 70, 110, 255);
-                    SDL_Rect bar {400, y - 4, 480, 40};
+                    SDL_Rect bar {400, y - 3, 480, 38};
                     GfxFill(renderer, &bar);
                 }
                 DrawText(renderer, label, 420, y, i == sel ? White : Grey);
             }
-            if (!note.empty()) DrawText(renderer, note, 420, 90 + count * 43 + 8, Accent);
+            if (!note.empty()) DrawText(renderer, note, 420, 86 + count * 40 + 4, Accent);
             DrawText(renderer, "A : valider   gauche/droite : changer   B : retour", 330, 672, Grey);
             GfxPresent(renderer);
 
@@ -1001,16 +1002,23 @@ int main(int argc, char** argv)
                 }
                 case 6:
                 {
+                    gpuScale = dir ? std::clamp(gpuScale + dir, 1, 3) : gpuScale % 3 + 1;
+                    if (useGpu) applyRenderer(true);
+                    saveUi();
+                    break;
+                }
+                case 7:
+                {
                     threaded3d = !threaded3d;
                     if (!useGpu) applyRenderer(false);
                     saveUi();
                     break;
                 }
-                case 7: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
-                case 8: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
-                case 9: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
-                case 10: if (act) result = 1; break;
-                case 11: if (act) result = 2; break;
+                case 8: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
+                case 9: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
+                case 10: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
+                case 11: if (act) result = 1; break;
+                case 12: if (act) result = 2; break;
                 }
             }
         }
