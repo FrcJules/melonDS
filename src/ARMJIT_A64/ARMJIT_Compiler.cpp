@@ -206,12 +206,17 @@ void Compiler::PopRegs(bool saveHiRegs, bool saveRegsToBeChanged)
     }
 }
 
+#ifdef __SWITCH__
+// the code memory view is switched between RW and RX, and each switch maps the whole region: keep it small
+static constexpr size_t SwitchJitSize = 12 * 1024 * 1024;
+#endif
+
 Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
 {
 #ifdef __SWITCH__
     ARMJIT_Global::Init();
 
-    Result jitResult = jitCreate(&JitObj, ARMJIT_Global::CodeMemorySliceSize);
+    Result jitResult = jitCreate(&JitObj, SwitchJitSize);
     if (R_FAILED(jitResult))
     {
         Log(LogLevel::Error, "jitCreate failed: 0x%x\n", jitResult);
@@ -221,7 +226,7 @@ Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
     CodeMemBase = jitGetRwAddr(&JitObj);
 
     SetCodeBase(reinterpret_cast<u8*>(jitGetRwAddr(&JitObj)), reinterpret_cast<u8*>(jitGetRxAddr(&JitObj)));
-    JitMemMainSize = ARMJIT_Global::CodeMemorySliceSize;
+    JitMemMainSize = SwitchJitSize;
 #else
     ARMJIT_Global::Init();
 
@@ -429,12 +434,19 @@ Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
 }
 
 #ifdef __SWITCH__
+// statistics read by the Switch frontend
+u64 SwitchJitTransitions = 0;
+u64 SwitchJitTransitionNs = 0;
+
 void Compiler::SetJitWritable(bool writable)
 {
     if (writable == JitIsWritable)
         return;
 
+    u64 t0 = armTicksToNs(armGetSystemTick());
     Result rc = writable ? jitTransitionToWritable(&JitObj) : jitTransitionToExecutable(&JitObj);
+    SwitchJitTransitionNs += armTicksToNs(armGetSystemTick()) - t0;
+    SwitchJitTransitions++;
     if (R_FAILED(rc))
     {
         Log(LogLevel::Error, "JIT transition (writable=%d) failed: 0x%x\n", writable, rc);

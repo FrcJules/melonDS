@@ -46,6 +46,8 @@
 
 using namespace melonDS;
 
+namespace melonDS { extern u64 SwitchJitTransitions; extern u64 SwitchJitTransitionNs; }
+
 extern std::string SwitchSavePath;
 extern std::string SwitchLogPath;
 
@@ -307,7 +309,7 @@ int main(int argc, char** argv)
         if (now - secStart >= std::chrono::seconds(1))
         {
             seconds++;
-            logf("%d %d %.1f %.1f\n", seconds, frames, sumMs / frames, maxMs);
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000));
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
