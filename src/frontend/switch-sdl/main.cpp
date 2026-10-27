@@ -40,7 +40,10 @@
 #include <string>
 #include <vector>
 
+#include <dirent.h>
+
 #include <SDL.h>
+#include <SDL_ttf.h>
 #include <switch.h>
 
 #include "Args.h"
@@ -79,10 +82,10 @@ static bool ReadFile(const std::string& path, std::unique_ptr<u8[]>& data, u32& 
     return len == (u32)size;
 }
 
-static std::map<std::string, std::string> ReadConfig()
+static std::map<std::string, std::string> ReadConfig(const char* file = "config.txt")
 {
     std::map<std::string, std::string> cfg;
-    FILE* f = fopen((std::string(ConfigDir) + "/config.txt").c_str(), "r");
+    FILE* f = fopen((std::string(ConfigDir) + "/" + file).c_str(), "r");
     if (!f) return cfg;
     char line[1024];
     while (fgets(line, sizeof(line), f))
@@ -118,6 +121,153 @@ static u32 DSKeyForButton(int button)
     return 0;
 }
 
+
+// ---- minimal UI: text with the console's shared font, ROM browser ----
+static TTF_Font* UIFont = nullptr;
+static const SDL_Color White {240, 240, 240, 255}, Grey {150, 160, 175, 255}, Accent {120, 210, 255, 255};
+
+static void DrawText(SDL_Renderer* r, const std::string& text, int x, int y, SDL_Color c)
+{
+    if (!UIFont || text.empty()) return;
+    SDL_Surface* surf = TTF_RenderUTF8_Blended(UIFont, text.c_str(), c);
+    if (!surf) return;
+    SDL_Texture* t = SDL_CreateTextureFromSurface(r, surf);
+    SDL_Rect d {x, y, surf->w, surf->h};
+    if (t) SDL_RenderCopy(r, t, nullptr, &d);
+    SDL_DestroyTexture(t);
+    SDL_FreeSurface(surf);
+}
+
+static bool FileExists(const std::string& path)
+{
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static std::string BaseName(const std::string& path)
+{
+    size_t sl = path.find_last_of('/');
+    return sl == std::string::npos ? path : path.substr(sl + 1);
+}
+
+static std::string StripExt(const std::string& name)
+{
+    size_t dot = name.find_last_of('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
+}
+
+static std::string LowerCase(std::string s)
+{
+    for (auto& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+// returns the chosen .nds path, or "" if the user quit (PLUS)
+static std::string BrowseRom(SDL_Renderer* r, std::string dir)
+{
+    struct Entry { std::string name; bool isDir; };
+    std::vector<Entry> entries;
+    int sel = 0, top = 0;
+    const int rows = 14;
+
+    auto join = [](const std::string& d, const std::string& n) { return d.back() == '/' ? d + n : d + "/" + n; };
+    auto load = [&]() {
+        entries.clear();
+        if (dir.size() > 6) entries.push_back({"..", true});
+        if (DIR* d = opendir(dir.c_str()))
+        {
+            std::vector<Entry> dirs, files;
+            while (dirent* e = readdir(d))
+            {
+                std::string n = e->d_name;
+                if (n.empty() || n[0] == '.') continue;
+                struct stat st;
+                bool isDir = e->d_type == DT_DIR || (stat(join(dir, n).c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+                if (isDir) dirs.push_back({n, true});
+                else
+                {
+                    std::string l = LowerCase(n);
+                    if (l.size() > 4 && (l.compare(l.size() - 4, 4, ".nds") == 0 || l.compare(l.size() - 4, 4, ".srl") == 0))
+                        files.push_back({n, false});
+                }
+            }
+            closedir(d);
+            auto byName = [](const Entry& a, const Entry& b) { return LowerCase(a.name) < LowerCase(b.name); };
+            std::sort(dirs.begin(), dirs.end(), byName);
+            std::sort(files.begin(), files.end(), byName);
+            entries.insert(entries.end(), dirs.begin(), dirs.end());
+            entries.insert(entries.end(), files.begin(), files.end());
+        }
+        sel = 0; top = 0;
+    };
+    load();
+
+    while (appletMainLoop())
+    {
+        SDL_SetRenderDrawColor(r, 18, 22, 30, 255);
+        SDL_RenderClear(r);
+        DrawText(r, "Choisir une ROM", 60, 24, Accent);
+        DrawText(r, dir, 60, 66, Grey);
+        for (int i = 0; i < rows && top + i < (int)entries.size(); i++)
+        {
+            const Entry& e = entries[top + i];
+            int y = 120 + i * 36;
+            if (top + i == sel)
+            {
+                SDL_SetRenderDrawColor(r, 40, 70, 110, 255);
+                SDL_Rect bar {40, y - 2, 1200, 36};
+                SDL_RenderFillRect(r, &bar);
+            }
+            DrawText(r, (e.isDir ? "[dossier]  " : "") + e.name, 60, y, top + i == sel ? White : Grey);
+        }
+        if (entries.empty()) DrawText(r, "(aucune ROM .nds ici)", 60, 120, Grey);
+        DrawText(r, "A : choisir     B : dossier parent     +/- : quitter", 60, 656, Grey);
+        SDL_RenderPresent(r);
+
+        SDL_Event ev;
+        if (!SDL_WaitEventTimeout(&ev, 200) || ev.type != SDL_JOYBUTTONDOWN) continue;
+        int n = (int)entries.size();
+        switch (ev.jbutton.button)
+        {
+        case 13: if (n) sel = std::max(sel - 1, 0); break;
+        case 15: if (n) sel = std::min(sel + 1, n - 1); break;
+        case 12: if (n) sel = std::max(sel - rows, 0); break;
+        case 14: if (n) sel = std::min(sel + rows, n - 1); break;
+        case 10: case 11: return "";
+        case 1:
+        {
+            if (dir.size() > 6)
+            {
+                size_t sl = dir.find_last_of('/');
+                dir = sl <= 5 ? "sdmc:/" : dir.substr(0, sl);
+                load();
+            }
+            break;
+        }
+        case 0:
+        {
+            if (!n) break;
+            const Entry& e = entries[sel];
+            if (e.isDir)
+            {
+                if (e.name == "..")
+                {
+                    size_t sl = dir.find_last_of('/');
+                    dir = sl <= 5 ? "sdmc:/" : dir.substr(0, sl);
+                }
+                else dir = join(dir, e.name);
+                load();
+            }
+            else return join(dir, e.name);
+            break;
+        }
+        }
+        if (sel < top) top = sel;
+        if (sel >= top + rows) top = sel - rows + 1;
+    }
+    return "";
+}
+
 static void MemLog(const char* label)
 {
     u64 total = 0, used = 0;
@@ -144,12 +294,6 @@ int main(int argc, char** argv)
 
     auto cfg = ReadConfig();
     logf("=== melonDS fork (Switch) start, jit=%s ===\n", cfg.count("jit") ? cfg["jit"].c_str() : "0");
-
-    if (!cfg.count("rom"))
-    {
-        logf("no rom= in config.txt\n");
-        return 1;
-    }
 
     // optional CPU overclock (off by default), restored on exit
     ClkrstSession cpuSession {};
@@ -188,9 +332,68 @@ int main(int argc, char** argv)
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK);
     SDL_Window* window = SDL_CreateWindow("melonDS", 0, 0, 1280, 720, 0);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
+    SDL_Texture* tex = nullptr;
     for (int i = 0; i < SDL_NumJoysticks(); i++)
         SDL_JoystickOpen(i);
+
+    // text: the console's shared font
+    if (R_SUCCEEDED(plInitialize(PlServiceType_User)) && TTF_Init() == 0)
+    {
+        PlFontData fd;
+        if (R_SUCCEEDED(plGetSharedFontByType(&fd, PlSharedFontType_Standard)))
+            UIFont = TTF_OpenFontRW(SDL_RWFromConstMem(fd.address, fd.size), 0, 28);
+    }
+    logf("ui font: %s\n", UIFont ? "ok" : "unavailable");
+
+    // display settings (menu), kept in ui.txt
+    auto ui = ReadConfig("ui.txt");
+    int layout = ui.count("layout") ? atoi(ui["layout"].c_str()) : 0;     // 0 stacked, 1 side by side
+    int filter = ui.count("filter") ? atoi(ui["filter"].c_str()) : 0;     // 0 sharp pixels, 1 smooth
+    bool showFps = ui.count("showfps") && ui["showfps"] == "1";
+    auto saveUi = [&]() {
+        FILE* f = fopen((std::string(ConfigDir) + "/ui.txt").c_str(), "w");
+        if (!f) return;
+        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\n", layout, filter, showFps ? 1 : 0);
+        fclose(f);
+    };
+
+    auto makeTexture = [&]() {
+        if (tex) SDL_DestroyTexture(tex);
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, filter ? "1" : "0");
+        tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 384);
+    };
+
+    // which ROM: rom= in config.txt wins, else the last one chosen (lastrom.txt); the browser opens if none, or with --browse
+    bool wantBrowse = false;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--browse")) wantBrowse = true;
+    std::string romPath = cfg.count("rom") ? cfg["rom"] : "";
+    const std::string configRom = romPath;
+    if (romPath.empty())
+    {
+        auto last = ReadConfig("lastrom.txt");
+        if (last.count("rom")) romPath = last["rom"];
+    }
+    if (wantBrowse || romPath.empty() || !FileExists(romPath))
+    {
+        std::string startDir = cfg.count("romdir") ? cfg["romdir"] : "";
+        if (startDir.empty() && !romPath.empty())
+        {
+            size_t sl = romPath.find_last_of('/');
+            if (sl != std::string::npos) startDir = romPath.substr(0, sl);
+        }
+        if (startDir.empty()) startDir = "sdmc:/";
+        romPath = BrowseRom(renderer, startDir);
+        if (romPath.empty())
+        {
+            logf("no ROM chosen\n");
+            return 0;
+        }
+        FILE* f = fopen((std::string(ConfigDir) + "/lastrom.txt").c_str(), "w");
+        if (f) { fprintf(f, "rom=%s\n", romPath.c_str()); fclose(f); }
+    }
+    logf("rom: %s\n", romPath.c_str());
+    makeTexture();
 
     SDL_AudioSpec want {}, have {};
     want.freq = 48000;
@@ -213,16 +416,16 @@ int main(int argc, char** argv)
             int frames = DebugFrames;
             idle = (frames == last) ? idle + 1 : 0;
             last = frames;
-            if (idle >= 1)
+            if (idle >= 1 && DebugStage != 99)
                 logf("watchdog: no frame progress for %ds (frames=%d, stage=%d, faults=%llu, lastfault addr=%llx pc=%llx)\n", idle, frames, (int)DebugStage, (unsigned long long)SwitchFaultCount, (unsigned long long)SwitchLastFaultAddr, (unsigned long long)SwitchLastFaultPC);
         }
     });
 
     std::unique_ptr<u8[]> romData;
     u32 romLen;
-    if (!ReadFile(cfg["rom"], romData, romLen))
+    if (!ReadFile(romPath, romData, romLen))
     {
-        logf("cannot read rom %s\n", cfg["rom"].c_str());
+        logf("cannot read rom %s\n", romPath.c_str());
         return 1;
     }
 
@@ -240,9 +443,9 @@ int main(int argc, char** argv)
     memlog("after NDS");
 
     NDSCart::NDSCartArgs cartArgs {};
-    if (cfg.count("sav"))
     {
-        SwitchSavePath = cfg["sav"];
+        // sav= only applies to the ROM named in config.txt; any other ROM gets <name>.sav next to the config
+        SwitchSavePath = (cfg.count("sav") && romPath == configRom) ? cfg["sav"] : std::string(ConfigDir) + "/" + StripExt(BaseName(romPath)) + ".sav";
         std::unique_ptr<u8[]> sav;
         u32 savLen = 0;
         if (ReadFile(SwitchSavePath, sav, savLen))
@@ -275,26 +478,26 @@ int main(int argc, char** argv)
     }
 
     DebugStage = 13;
-    nds->SetupDirectBoot(cfg["rom"]);
+    nds->SetupDirectBoot(romPath);
     DebugStage = 14;
     nds->Start();
     DebugStage = 15;
     logf("fastmem: %s\n", nds->JIT.FastMemoryEnabled() ? "on" : "off");
     memlog("after Start");
 
-    // screens: 256x384 scaled to the 720 px height, centred
-    const int dh = 720, dw = 480, dx = (1280 - dw) / 2;
-    SDL_Rect dst {dx, 0, dw, dh};
+    // screens: stacked (480x720, centred) or side by side (2 x 640x480)
+    SDL_Rect topR {}, botR {};
+    auto computeLayout = [&]() {
+        if (layout == 1) { topR = {0, 120, 640, 480}; botR = {640, 120, 640, 480}; }
+        else { topR = {400, 0, 480, 360}; botR = {400, 360, 480, 360}; }
+    };
+    computeLayout();
+    SDL_Texture* fpsTex = nullptr;
+    int fpsW = 0, fpsH = 0;
+    bool relaunch = false;
 
     // save states
-    std::string romBase = cfg["rom"];
-    {
-        size_t sl = romBase.find_last_of('/');
-        std::string name = sl == std::string::npos ? romBase : romBase.substr(sl + 1);
-        size_t dot = name.find_last_of('.');
-        if (dot != std::string::npos) name = name.substr(0, dot);
-        romBase = std::string(ConfigDir) + "/" + name;
-    }
+    const std::string romBase = std::string(ConfigDir) + "/" + StripExt(BaseName(romPath));
     auto statePath = [&](int slot) { return romBase + ".ss" + std::to_string(slot); };
     auto saveState = [&](const std::string& path) -> bool {
         Savestate st;
@@ -339,6 +542,81 @@ int main(int argc, char** argv)
     auto fbUntil = std::chrono::steady_clock::now();
     auto feedback = [&](u8 r, u8 g, u8 b, int sl) { fbR = r; fbG = g; fbB = b; fbSlot = sl; fbUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(4000); };
 
+    auto drawScreens = [&]() {
+        SDL_Rect srcTop {0, 0, 256, 192}, srcBot {0, 192, 256, 192};
+        SDL_RenderCopy(renderer, tex, &srcTop, &topR);
+        SDL_RenderCopy(renderer, tex, &srcBot, &botR);
+    };
+
+    // in-game menu (ZL + ZR + PLUS): emulation is paused. Returns 0 = resume, 1 = change ROM, 2 = quit
+    auto runMenu = [&]() -> int {
+        if (audio) SDL_PauseAudioDevice(audio, 1);
+        const int prevStage = DebugStage;
+        DebugStage = 99;   // paused: the watchdog must not report a hang
+        const char* names[] = {"Reprendre", "Disposition", "Filtre", "Afficher les fps", "Emplacement d'état", "Sauvegarder l'état", "Charger l'état", "Changer de ROM", "Quitter"};
+        const int count = 9;
+        int sel = 0, result = -1;
+        std::string note;
+        while (result < 0 && appletMainLoop())
+        {
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            SDL_RenderClear(renderer);
+            drawScreens();
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 10, 14, 22, 215);
+            SDL_Rect full {0, 0, 1280, 720};
+            SDL_RenderFillRect(renderer, &full);
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+            DrawText(renderer, "Menu", 420, 40, Accent);
+            for (int i = 0; i < count; i++)
+            {
+                std::string label = names[i];
+                if (i == 1) label += std::string(" : ") + (layout ? "côte à côte" : "empilées");
+                if (i == 2) label += std::string(" : ") + (filter ? "lissé" : "pixels nets");
+                if (i == 3) label += std::string(" : ") + (showFps ? "oui" : "non");
+                if (i == 4) label += " : " + std::to_string(slot);
+                int y = 100 + i * 52;
+                if (i == sel)
+                {
+                    SDL_SetRenderDrawColor(renderer, 40, 70, 110, 255);
+                    SDL_Rect bar {400, y - 4, 480, 46};
+                    SDL_RenderFillRect(renderer, &bar);
+                }
+                DrawText(renderer, label, 420, y, i == sel ? White : Grey);
+            }
+            if (!note.empty()) DrawText(renderer, note, 420, 100 + count * 52 + 8, Accent);
+            DrawText(renderer, "A : valider   gauche/droite : changer   B : retour", 330, 672, Grey);
+            SDL_RenderPresent(renderer);
+
+            SDL_Event ev;
+            if (!SDL_WaitEventTimeout(&ev, 200) || ev.type != SDL_JOYBUTTONDOWN) continue;
+            int b = ev.jbutton.button;
+            int dir = b == 14 ? 1 : b == 12 ? -1 : 0;
+            if (b == 13) sel = (sel + count - 1) % count;
+            else if (b == 15) sel = (sel + 1) % count;
+            else if (b == 1 || b == 10) result = 0;
+            else if (b == 0 || dir)
+            {
+                bool act = b == 0;
+                switch (sel)
+                {
+                case 0: if (act) result = 0; break;
+                case 1: layout ^= 1; computeLayout(); saveUi(); break;
+                case 2: filter ^= 1; makeTexture(); saveUi(); break;
+                case 3: showFps = !showFps; saveUi(); break;
+                case 4: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
+                case 5: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
+                case 6: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
+                case 7: if (act) result = 1; break;
+                case 8: if (act) result = 2; break;
+                }
+            }
+        }
+        DebugStage = prevStage;
+        if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); }
+        return result < 0 ? 2 : result;
+    };
+
     u32 keys = 0;
     bool running = true;
     bool touching = false;
@@ -375,6 +653,14 @@ int main(int argc, char** argv)
                         if (ok && audio) SDL_ClearQueuedAudio(audio);
                         feedback(ok ? 50 : 220, ok ? 120 : 40, ok ? 230 : 40, slot);
                     }
+                    else if (b == 10)
+                    {
+                        int choice = runMenu();
+                        pad = 0;
+                        keys = 0;
+                        if (choice == 1) relaunch = true;
+                        if (choice != 0) running = false;
+                    }
                     else if (b == 12 || b == 14)
                     {
                         slot = b == 14 ? std::min(slot + 1, 4) : std::max(slot - 1, 1);
@@ -392,8 +678,8 @@ int main(int argc, char** argv)
             else if (ev.type == SDL_FINGERDOWN || ev.type == SDL_FINGERMOTION)
             {
                 int px = (int)(ev.tfinger.x * 1280), py = (int)(ev.tfinger.y * 720);
-                int sx = (px - dx) * 256 / dw;
-                int sy = py * 384 / dh - 192;
+                int sx = (px - botR.x) * 256 / botR.w;
+                int sy = (py - botR.y) * 192 / botR.h;
                 if (sx >= 0 && sx < 256 && sy >= 0 && sy < 192)
                 {
                     nds->TouchScreen(sx, sy);
@@ -438,8 +724,14 @@ int main(int argc, char** argv)
             }
         }
         DebugStage = 4;
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, tex, nullptr, &dst);
+        drawScreens();
+        if (showFps && fpsTex)
+        {
+            SDL_Rect d {1280 - fpsW - 16, 8, fpsW, fpsH};
+            SDL_RenderCopy(renderer, fpsTex, nullptr, &d);
+        }
         if (clock::now() < fbUntil)
         {
             SDL_SetRenderDrawColor(renderer, fbR, fbG, fbB, 255);
@@ -479,6 +771,19 @@ int main(int argc, char** argv)
         if (now - secStart >= std::chrono::seconds(1))
         {
             seconds++;
+            if (showFps && UIFont)
+            {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d fps", frames);
+                if (fpsTex) SDL_DestroyTexture(fpsTex);
+                fpsTex = nullptr;
+                if (SDL_Surface* sf = TTF_RenderUTF8_Blended(UIFont, buf, SDL_Color {120, 255, 140, 255}))
+                {
+                    fpsTex = SDL_CreateTextureFromSurface(renderer, sf);
+                    fpsW = sf->w; fpsH = sf->h;
+                    SDL_FreeSurface(sf);
+                }
+            }
             u32 curClock = 0;
             if (clkOk) clkrstGetClockRate(&cpuSession, &curClock);
             u32 emcClock = 0, gpuClock = 0;
@@ -513,5 +818,11 @@ int main(int argc, char** argv)
     if (tsOk) tsSessionClose(&tsSession);
     tsExit();
     clkrstExit();
+    if (relaunch)
+    {
+        // come back to this homebrew with the ROM browser open
+        std::string line = std::string("\"") + argv[0] + "\" --browse";
+        envSetNextLoad(argv[0], line.c_str());
+    }
     return 0;
 }
