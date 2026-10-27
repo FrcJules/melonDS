@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.16)
 find_package(Threads REQUIRED)
 find_package(SDL2 REQUIRED)
 
+set(SWITCH_APP_NAME "melonDS fork" CACHE STRING "Title shown in hbmenu")
+
 add_executable(melonDS-switch
     main.cpp
     Platform.cpp
@@ -16,7 +18,7 @@ find_program(NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin)
 find_program(ELF2NRO elf2nro HINTS $ENV{DEVKITPRO}/tools/bin)
 if (NACPTOOL AND ELF2NRO)
     add_custom_command(TARGET melonDS-switch POST_BUILD
-        COMMAND ${NACPTOOL} --create "melonDS fork" "FrcJules" "0.1" melonDS-switch.nacp
+        COMMAND ${NACPTOOL} --create "${SWITCH_APP_NAME}" "FrcJules" "0.1" melonDS-switch.nacp
         COMMAND ${ELF2NRO} $<TARGET_FILE:melonDS-switch> melonDS-switch.nro --nacp=melonDS-switch.nacp
         COMMENT "Creating melonDS-switch.nro")
 endif()

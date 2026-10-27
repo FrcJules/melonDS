@@ -28,6 +28,8 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <chrono>
 #include <map>
 #include <memory>
@@ -46,6 +48,10 @@ using namespace melonDS;
 
 extern std::string SwitchSavePath;
 extern std::string SwitchLogPath;
+
+// where the main loop currently is, logged once per second by a watchdog thread (to locate hangs)
+static std::atomic<int> DebugStage {0};
+static std::atomic<int> DebugFrames {0};
 
 static const char* ConfigDir = "sdmc:/switch/melonds-fork";
 
@@ -199,6 +205,20 @@ int main(int argc, char** argv)
     const int dh = 720, dw = 480, dx = (1280 - dw) / 2;
     SDL_Rect dst {dx, 0, dw, dh};
 
+    std::atomic<bool> watchdogStop {false};
+    std::thread watchdog([&]() {
+        int last = -1, idle = 0;
+        while (!watchdogStop)
+        {
+            SDL_Delay(1000);
+            int frames = DebugFrames;
+            idle = (frames == last) ? idle + 1 : 0;
+            last = frames;
+            if (idle >= 1)
+                logf("watchdog: no frame progress for %ds (frames=%d, stage=%d)\n", idle, frames, (int)DebugStage);
+        }
+    });
+
     u32 keys = 0;
     bool running = true;
     bool touching = false;
@@ -239,6 +259,7 @@ int main(int argc, char** argv)
         if ((keys & quit) == quit)
             break;
 
+        DebugStage = 2;
         nds->SetKeyMask(~keys & 0xFFF);
 
         auto t0 = clock::now();
@@ -247,6 +268,8 @@ int main(int argc, char** argv)
         sumMs += ms;
         maxMs = std::max(maxMs, ms);
         frames++;
+        DebugFrames++;
+        DebugStage = 3;
 
         void *top, *bottom;
         if (nds->GPU.GetFramebuffers(&top, &bottom))
@@ -262,10 +285,12 @@ int main(int argc, char** argv)
                 SDL_UnlockTexture(tex);
             }
         }
+        DebugStage = 4;
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
         SDL_RenderPresent(renderer);
 
+        DebugStage = 5;
         // drain the SPU every frame; drop audio if the device falls too far behind
         for (;;)
         {
@@ -288,6 +313,8 @@ int main(int argc, char** argv)
         }
     }
 
+    watchdogStop = true;
+    watchdog.join();
     logf("=== stop ===\n");
     if (audio) SDL_CloseAudioDevice(audio);
     SDL_DestroyTexture(tex);
