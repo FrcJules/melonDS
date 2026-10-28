@@ -25,6 +25,9 @@
 #include "GPU3D_Soft.h"
 #include "Platform.h"
 #include "GPU3D.h"
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 namespace melonDS
 {
@@ -912,6 +915,38 @@ int ClipPolygon(GPU3D& gpu, Vertex* vertices, int nverts, int clipstart)
     // some vertices that should get Y=-0x1000 get Y=0x1000 for some reason on hardware. it doesn't make sense.
     // clipping seems to process the Y plane before the X plane.
 
+    // fast path: when every vertex lies inside the view volume nothing gets clipped, and the three
+    // passes below would only copy the vertices around and apply the color fixup. Do just the fixup
+    // (same result, bit for bit). The first clipstart vertices are only ever used as neighbours.
+    {
+        bool inside = true;
+        for (int i = clipstart; i < nverts; i++)
+        {
+            const Vertex* vtx = &vertices[i];
+            s32 w = vtx->Position[3];
+            if (vtx->Position[0] > w || vtx->Position[1] > w || vtx->Position[2] > w ||
+                vtx->Position[0] < -w || vtx->Position[1] < -w || vtx->Position[2] < -w)
+            {
+                inside = false;
+                break;
+            }
+        }
+
+        if (inside)
+        {
+            for (int i = 0; i < nverts; i++)
+            {
+                Vertex* vtx = &vertices[i];
+
+                vtx->Color[0] &= ~0xFFF; vtx->Color[0] += 0xFFF;
+                vtx->Color[1] &= ~0xFFF; vtx->Color[1] += 0xFFF;
+                vtx->Color[2] &= ~0xFFF; vtx->Color[2] += 0xFFF;
+            }
+
+            return nverts;
+        }
+    }
+
     // Z clipping
     nverts = ClipAgainstPlane<2, attribs>(gpu, vertices, nverts, clipstart);
 
@@ -1101,6 +1136,23 @@ void GPU3D::SubmitPolygon() noexcept
         {
             posX = 0;
             posY = 0;
+        }
+        else if (w <= 0xFFFF && vtx->Position[0] >= -(s32)w && vtx->Position[0] <= (s32)w &&
+                 vtx->Position[1] >= -(s32)w && vtx->Position[1] <= (s32)w)
+        {
+            // common case (vertex inside the view volume, no divider precision loss):
+            // the hi-res division gives the low-res result too, since floor(16*q)>>4 == floor(q)
+            u32 ax = vtx->Position[0] + w;
+            u32 ay = -vtx->Position[1] + w;
+            u32 den = w << 1;
+            u32 hx = ((ax * Viewport[4]) << 4) / den;
+            u32 hy = ((ay * Viewport[5]) << 4) / den;
+
+            vtx->FinalPosition[0] = ((hx >> 4) + Viewport[0]) & 0x1FF;
+            vtx->FinalPosition[1] = ((hy >> 4) + Viewport[3]) & 0xFF;
+            vtx->HiresPosition[0] = (hx + (Viewport[0] << 4)) & 0x1FFF;
+            vtx->HiresPosition[1] = (hy + (Viewport[3] << 4)) & 0xFFF;
+            continue;
         }
         else
         {
@@ -1343,10 +1395,27 @@ void GPU3D::SubmitVertex() noexcept
     Vertex* vertextrans = &TempVertexBuffer[VertexNumInPoly];
 
     UpdateClipMatrix();
+#if defined(__aarch64__)
+    {
+        // same 64-bit sums as the scalar code below, two components per NEON register:
+        // Position[j] = (x*M[j] + y*M[4+j] + z*M[8+j] + 0x1000*M[12+j]) >> 12 (truncated to 32 bits)
+        const s32* m = ClipMatrix;
+        int64x2_t a01 = vmull_n_s32(vld1_s32(&m[0]), CurVertex[0]);
+        int64x2_t a23 = vmull_n_s32(vld1_s32(&m[2]), CurVertex[0]);
+        a01 = vmlal_n_s32(a01, vld1_s32(&m[4]), CurVertex[1]);
+        a23 = vmlal_n_s32(a23, vld1_s32(&m[6]), CurVertex[1]);
+        a01 = vmlal_n_s32(a01, vld1_s32(&m[8]), CurVertex[2]);
+        a23 = vmlal_n_s32(a23, vld1_s32(&m[10]), CurVertex[2]);
+        a01 = vmlal_n_s32(a01, vld1_s32(&m[12]), 0x1000);
+        a23 = vmlal_n_s32(a23, vld1_s32(&m[14]), 0x1000);
+        vst1q_s32(vertextrans->Position, vcombine_s32(vshrn_n_s64(a01, 12), vshrn_n_s64(a23, 12)));
+    }
+#else
     vertextrans->Position[0] = (vertex[0]*ClipMatrix[0] + vertex[1]*ClipMatrix[4] + vertex[2]*ClipMatrix[8] + vertex[3]*ClipMatrix[12]) >> 12;
     vertextrans->Position[1] = (vertex[0]*ClipMatrix[1] + vertex[1]*ClipMatrix[5] + vertex[2]*ClipMatrix[9] + vertex[3]*ClipMatrix[13]) >> 12;
     vertextrans->Position[2] = (vertex[0]*ClipMatrix[2] + vertex[1]*ClipMatrix[6] + vertex[2]*ClipMatrix[10] + vertex[3]*ClipMatrix[14]) >> 12;
     vertextrans->Position[3] = (vertex[0]*ClipMatrix[3] + vertex[1]*ClipMatrix[7] + vertex[2]*ClipMatrix[11] + vertex[3]*ClipMatrix[15]) >> 12;
+#endif
 
     // this probably shouldn't be.
     // the way color is handled during clipping needs investigation. TODO
