@@ -95,15 +95,23 @@ if (ENABLE_GDBSTUB)
 endif()
 
 if (ENABLE_OGLRENDERER)
+    # the compute renderer needs OpenGL 4.3 (shader storage buffers), not available with OpenGL ES / WebGL
+    option(ENABLE_OGL_COMPUTE "Enable the OpenGL compute shader renderer" ON)
+
     add_subdirectory(OpenGL_shaders)
     target_sources(core PRIVATE
         GPU_OpenGL.cpp
         GPU2D_OpenGL.cpp
         GPU3D_OpenGL.cpp
-        GPU3D_Compute.cpp
         GPU3D_TexcacheOpenGL.cpp
         GPU3D_TexcacheOpenGL.h
         OpenGLSupport.cpp)
+
+    if (ENABLE_OGL_COMPUTE)
+        target_sources(core PRIVATE GPU3D_Compute.cpp)
+    else()
+        target_compile_definitions(core PUBLIC OGL_COMPUTE_DISABLED)
+    endif()
 
     target_compile_definitions(core PUBLIC OGLRENDERER_ENABLED)
 endif()
@@ -243,3 +251,13 @@ endif()
 #  )
 #endif()
 
+
+# GCC 15.2 crashes (internal compiler error in expand_expr_real_2) compiling DMA.cpp with -flto: build that file without LTO
+if (MELONDS_LTO_EXCLUDE_DMA)
+    set_source_files_properties(DMA.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
+endif()
+
+# LTO made the OpenGL 2D renderer ~500x slower in one game (cause unknown): keep it out of LTO
+if (MELONDS_LTO_EXCLUDE_GL AND ENABLE_OGLRENDERER)
+    set_source_files_properties(GPU_OpenGL.cpp GPU2D_OpenGL.cpp GPU3D_OpenGL.cpp GPU3D_TexcacheOpenGL.cpp OpenGLSupport.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
+endif()
