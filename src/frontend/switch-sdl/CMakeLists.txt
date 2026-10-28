@@ -22,6 +22,9 @@ if (ENABLE_OGLRENDERER)
     target_include_directories(core PUBLIC $ENV{DEVKITPRO}/portlibs/switch/include)
 endif()
 
+# one emulator instance, always run from the main thread (see NDS::Current)
+target_compile_definitions(core PUBLIC MELONDS_SINGLE_NDS_THREAD)
+
 # optional timing of the emulation loop (src/Prof.h), read by main.cpp
 if (SWITCH_PROFILE)
     target_compile_definitions(core PUBLIC MELONDS_PROF)

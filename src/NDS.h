@@ -568,7 +568,13 @@ public:
     NDS(NDS&&) = delete;
     NDS& operator=(NDS&&) = delete;
 
+#ifdef MELONDS_SINGLE_NDS_THREAD
+    // frontends that run one instance, always from the same thread: a plain pointer
+    // (reading a thread_local is a function call on some targets, and the JIT slow paths read it at every access)
+    static NDS* Current;
+#else
     static thread_local NDS* Current;
+#endif
 protected:
     explicit NDS(NDSArgs&& args, int type, void* userdata) noexcept;
     virtual u32 GetSavestateConfig();

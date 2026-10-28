@@ -19,7 +19,7 @@
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>   gpuclock=<MHz, 0 = system default>
-//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 128; melonDS uses 64)   audioctl=0|1   audioskew=<ratio>   audiodump=<seconds>
+//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 128; melonDS uses 64)   audioctl=0|1   audioskew=<ratio>   audiodump=<seconds>   sampler=<seconds> (sampling profiler, samples.bin)
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
@@ -33,6 +33,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #include <functional>
@@ -132,6 +135,41 @@ static u32 DSKeyForButton(int button)
 
 
 unsigned long long MelonGLProf[16];   // see PlatformOGL.h
+
+// sampling profiler (config sampler=<seconds>): a thread on core 2 (unused otherwise) pauses the emulation thread about
+// every 500 us, reads its PC and LR and resumes it; after a 5 s delay and <seconds> of sampling, the pairs are written
+// to samples.bin (u64 PC, u64 LR). Off by default.
+struct SamplerState
+{
+    Handle Target = INVALID_HANDLE;
+    int Seconds = 0;
+    std::atomic<bool> Stop {false}, Done {false};
+    std::vector<u64> Samples;
+    u64 Failures = 0;
+};
+static void SamplerThread(void* arg)
+{
+    auto* st = (SamplerState*)arg;
+    svcSleepThread(5000000000ll);
+    u64 end = armGetSystemTick() + armNsToTicks((u64)st->Seconds * 1000000000ull);
+    while (!st->Stop && armGetSystemTick() < end)
+    {
+        svcSleepThread(500000);
+        if (R_FAILED(svcSetThreadActivity(st->Target, ThreadActivity_Paused))) { st->Failures++; continue; }
+        ThreadContext ctx;
+        Result rc = svcGetThreadContext3(&ctx, st->Target);
+        svcSetThreadActivity(st->Target, ThreadActivity_Runnable);
+        if (R_FAILED(rc)) { st->Failures++; continue; }
+        st->Samples.push_back(ctx.pc.x);
+        st->Samples.push_back(ctx.lr);
+    }
+    if (FILE* f = fopen("sdmc:/switch/melonds-fork/samples.bin", "wb"))
+    {
+        fwrite(st->Samples.data(), sizeof(u64), st->Samples.size(), f);
+        fclose(f);
+    }
+    st->Done = true;
+}
 
 // glColorMaskiOES (per-attachment colour masks, used by the GPU renderer) is an extension: resolved through EGL
 extern "C" void glColorMaskiOES(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
@@ -870,6 +908,18 @@ int main(int argc, char** argv)
     logf("fastmem: %s, main thread on core %d, helper core %d\n", nds->JIT.FastMemoryEnabled() ? "on" : "off", (int)svcGetCurrentProcessorNumber(), Platform::SwitchHelperCore);
     memlog("after Start");
 
+    SamplerState sampler;
+    Thread samplerThread {};
+    bool samplerOn = false, samplerLogged = false;
+    if (cfg.count("sampler") && atoi(cfg["sampler"].c_str()) > 0)
+    {
+        sampler.Target = threadGetCurHandle();
+        sampler.Seconds = std::clamp(atoi(cfg["sampler"].c_str()), 1, 120);
+        sampler.Samples.reserve((size_t)sampler.Seconds * 2000 * 2);
+        samplerOn = R_SUCCEEDED(threadCreate(&samplerThread, SamplerThread, &sampler, nullptr, 0x10000, 0x2B, 2)) && R_SUCCEEDED(threadStart(&samplerThread));
+        logf("sampler: %s, %d s after a 5 s delay\n", samplerOn ? "started" : "FAILED to start", sampler.Seconds);
+    }
+
     // screens: stacked (480x720, centred) or side by side (2 x 640x480)
     SDL_Rect topR {}, botR {};
     auto computeLayout = [&]() {
@@ -1075,6 +1125,50 @@ int main(int argc, char** argv)
     int seconds = 0;
     u64 audioUnderruns = 0, audioDrops = 0;
 
+    // the per-second statistics line is written by a separate thread, which also reads the clocks and the temperature:
+    // opening/closing the log on the SD card and these service calls blocked the emulation thread ~5 ms every second
+    std::mutex logMutex;
+    std::condition_variable logCv;
+    std::deque<std::string> logQueue;
+    bool logStop = false;
+    std::atomic<u32> statClock {0}, statEmc {0}, statGpu {0};
+    std::atomic<float> statTemp {0.f};
+    auto readStats = [&]() {
+        u32 v = 0;
+        if (clkOk && R_SUCCEEDED(clkrstGetClockRate(&cpuSession, &v))) statClock = v;
+        if (emcOk && R_SUCCEEDED(clkrstGetClockRate(&emcSession, &v))) statEmc = v;
+        if (gpuOk && R_SUCCEEDED(clkrstGetClockRate(&gpuSession, &v))) statGpu = v;
+        float t = 0;
+        if (tsOk && R_SUCCEEDED(tsSessionGetTemperature(&tsSession, &t))) statTemp = t;
+    };
+    readStats();
+    std::thread logThread([&]() {
+        std::unique_lock<std::mutex> lock(logMutex);
+        for (;;)
+        {
+            logCv.wait(lock, [&] { return logStop || !logQueue.empty(); });
+            while (!logQueue.empty())
+            {
+                std::string line = std::move(logQueue.front());
+                logQueue.pop_front();
+                lock.unlock();
+                logf("%s", line.c_str());
+                readStats();
+                lock.lock();
+            }
+            if (logStop) break;
+        }
+    });
+    auto logAsync = [&](const char* fmt, auto... a) {
+        char buf[1024];
+        snprintf(buf, sizeof(buf), fmt, a...);
+        {
+            std::lock_guard<std::mutex> lock(logMutex);
+            logQueue.emplace_back(buf);
+        }
+        logCv.notify_one();
+    };
+
     while (running && appletMainLoop())
     {
         SDL_Event ev;
@@ -1272,13 +1366,9 @@ int main(int argc, char** argv)
                     SDL_FreeSurface(sf);
                 }
             }
-            u32 curClock = 0;
-            if (clkOk) clkrstGetClockRate(&cpuSession, &curClock);
-            u32 emcClock = 0, gpuClock = 0;
-            if (emcOk) clkrstGetClockRate(&emcSession, &emcClock);
-            if (gpuOk) clkrstGetClockRate(&gpuSession, &gpuClock);
-            float temp = 0;
-            if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
+            // clocks and temperature are read by the log thread (service calls), values up to 1 s old
+            u32 curClock = statClock, emcClock = statEmc, gpuClock = statGpu;
+            float temp = statTemp;
             // emulation-loop timing, microseconds per frame (virtual counter ticks at 19.2 MHz)
 #if defined(MELONDS_PROF) && defined(__aarch64__)
 #define P(c) ((unsigned long long)(MelonProf[c] / 19.2 / std::max(frames, 1)))
@@ -1286,7 +1376,7 @@ int main(int argc, char** argv)
 #define P(c) 0ull
 enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, ProfGeom, ProfTimers };
 #endif
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15));
+            logAsync("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15));
             if (autoClock && overclockMHz < 1785)
             {
                 lowFpsSeconds = frames < 57 ? lowFpsSeconds + 1 : 0;
@@ -1296,6 +1386,11 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
                     if (clkOk) clkrstSetClockRate(&cpuSession, 1785u * 1000000u);
                     logf("auto clock: %d fps for 3 s, CPU raised to 1785 MHz\n", frames);
                 }
+            }
+            if (samplerOn && sampler.Done && !samplerLogged)
+            {
+                samplerLogged = true;
+                logf("sampler: %u samples written, %llu failures\n", (unsigned)(sampler.Samples.size() / 2), (unsigned long long)sampler.Failures);
             }
             memset(MelonGLProf, 0, sizeof(MelonGLProf));
 #if defined(MELONDS_PROF) && defined(__aarch64__)
@@ -1318,6 +1413,18 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
     GfxTexDestroy(&fpsTex);
     if (UIFont) TTF_CloseFont(UIFont);
     TTF_Quit();
+    if (samplerOn)
+    {
+        sampler.Stop = true;
+        threadWaitForExit(&samplerThread);
+        threadClose(&samplerThread);
+    }
+    {
+        std::lock_guard<std::mutex> lock(logMutex);
+        logStop = true;
+    }
+    logCv.notify_one();
+    logThread.join();
     logf("exit step 1\n");
     plExit();
     logf("exit step 2\n");
