@@ -190,6 +190,23 @@ template <bool Write, int ConsoleType>
 void SlowBlockTransfer9(u32 addr, u64* data, u32 num, ARMv5* cpu)
 {
     addr &= ~0x3;
+
+    // whole block in DTCM (not shadowed by ITCM; DTCM is one contiguous window, so checking the first and the
+    // last word is enough): same accesses as SlowRead9/SlowWrite9 would do for each word, without the per-word checks
+    u32 last = addr + (num - 1) * 4;
+    if (num > 0 && last >= addr && addr >= cpu->ITCMSize &&
+        (addr & cpu->DTCMMask) == cpu->DTCMBase && (last & cpu->DTCMMask) == cpu->DTCMBase)
+    {
+        for (u32 i = 0; i < num; i++, addr += 4)
+        {
+            if (Write)
+                *(u32*)&cpu->DTCM[addr & 0x3FFF] = (u32)data[i];
+            else
+                data[i] = *(u32*)&cpu->DTCM[addr & 0x3FFF];
+        }
+        return;
+    }
+
     for (u32 i = 0; i < num; i++)
     {
         if (Write)
