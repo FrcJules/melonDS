@@ -1030,10 +1030,13 @@ int main(int argc, char** argv)
     int slot = 1;
     // CPU auto mode: starts at 1224 MHz, raised to 1785 MHz as soon as the game falls behind (the last 30 frames took
     // more than 540 ms, i.e. 3 missed refreshes in ~0.5 s; before: 3 s under 57 fps), lowered back to 1224 MHz after
-    // autoHold seconds at full speed. If the game falls behind within 10 s of a lowering, the hold time doubles (4 min max).
+    // autoHold seconds at full speed with CPU headroom (see busyPermille). If the game falls behind within 10 s of a lowering, the hold time doubles (4 min max).
     std::chrono::steady_clock::time_point autoFrameTimes[31];
     int autoFrameCount = 0;   // frames recorded since the last reset (state loaded, menu, clock change)
     int autoFastSeconds = 0, autoHold = 30, autoLoweredAt = -1000;
+    // CPU time of the emulation thread (ticks at 19.2 MHz, waits in the GPU driver/vsync excluded), per second, in 1/1000
+    u64 busyTicks0 = 0;   // read at the first second (the first value is not used)
+    int busyPermille = 0;
     double audioSkew = 1.0;
     // audio rate control: audioctl=1 (default) uses the queue level averaged over ~20 frames, audioctl=0 the raw level
     // of each frame (previous behaviour). audioskew=<ratio> fixes the rate (reference recordings).
@@ -1452,6 +1455,15 @@ int main(int argc, char** argv)
         if (now - secStart >= std::chrono::seconds(1))
         {
             seconds++;
+            {
+                u64 t = 0;
+                if (R_SUCCEEDED(svcGetInfo(&t, InfoType_ThreadTickCount, threadGetCurHandle(), TickCountInfo_Total)))
+                {
+                    double el = std::chrono::duration<double>(now - secStart).count();
+                    busyPermille = busyTicks0 ? (int)((t - busyTicks0) / 19200.0 / el) : 0;
+                    busyTicks0 = t;
+                }
+            }
             if (showFps && UIFont)
             {
                 char buf[32];
@@ -1473,10 +1485,12 @@ int main(int argc, char** argv)
 #define P(c) 0ull
 enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, ProfGeom, ProfTimers };
 #endif
-            logAsync("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15));
+            logAsync("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu busy=%d\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15), busyPermille);
             if (autoClock && overclockMHz == 1785)
             {
-                autoFastSeconds = frames >= 59 ? autoFastSeconds + 1 : 0;
+                // a second counts only with headroom: under 60 % of CPU time at 1785 MHz is ~84 % at 1224 MHz (measured ratio
+                // ~1.4; at 1224 MHz the game falls behind from ~86 %). Mario Kart DS replay: 52-55 % light parts, 76-85 % heavy
+                autoFastSeconds = (frames >= 59 && busyPermille < 600) ? autoFastSeconds + 1 : 0;
                 if (autoFastSeconds >= autoHold)
                 {
                     overclockMHz = 1224;
