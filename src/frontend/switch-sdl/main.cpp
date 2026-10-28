@@ -18,7 +18,7 @@
 
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
-//   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>   gpuclock=<MHz, 0 = system default>
+//   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off, auto>   gpuclock=<MHz, 0 = system default>
 //   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 128; melonDS uses 64)   audioctl=0|1   audioskew=<ratio>   audiodump=<seconds>   sampler=<seconds> (sampling profiler, samples.bin)
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
@@ -690,7 +690,7 @@ int main(int argc, char** argv)
     // CPU clock: config.txt overclock= (fixed) > ui.txt cpu= (0 = auto) > auto. Auto starts at 1224 MHz and goes to 1785 MHz
     // when the game drops under 57 fps for 3 seconds (it never goes back down during a session)
     int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 0);
-    bool autoClock = overclockMHz == 0 && !cfg.count("overclock");
+    bool autoClock = overclockMHz == 0 && (!cfg.count("overclock") || cfg["overclock"] == "auto");   // overclock=auto forces the auto mode
     if (autoClock) overclockMHz = 1224;
     // 3D renderer: the GLES 3 renderer (default, 2x) or software; software is also the fallback if the GL renderer fails. The GLES 3 renderer on the console's GPU (config gpu=0|1, menu, ui.txt)
     bool useGpu = cfg.count("gpu") ? cfg["gpu"] == "1" : (ui0.count("gpu") ? ui0["gpu"] == "1" : true);
@@ -961,33 +961,61 @@ int main(int argc, char** argv)
     // save states
     const std::string romBase = std::string(ConfigDir) + "/" + StripExt(BaseName(romPath));
     auto statePath = [&](int slot) { return romBase + ".ss" + std::to_string(slot); };
-    auto saveState = [&](const std::string& path) -> bool {
-        Savestate st;
-        if (st.Error) return false;
-        if (!nds->DoSavestate(&st) || st.Error) return false;
+    // the last state saved or loaded stays in memory: loading it again does not read the SD card (~19 MB, the game
+    // froze ~1.5 s and the sound cut). Saves during the game are written to the SD card by a background thread.
+    int cachedSlot = -1;
+    std::shared_ptr<std::vector<u8>> cachedState;
+    std::thread stateWriter;
+    auto writeStateFile = [](const std::string& path, const std::vector<u8>& data) -> bool {
         std::string tmp = path + ".tmp";
         FILE* f = fopen(tmp.c_str(), "wb");
         if (!f) return false;
-        bool ok = fwrite(st.Buffer(), 1, st.Length(), f) == st.Length();
+        bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
         ok = (fclose(f) == 0) && ok;
         if (!ok) { remove(tmp.c_str()); return false; }
         remove(path.c_str());
         return rename(tmp.c_str(), path.c_str()) == 0;
     };
-    auto loadState = [&](const std::string& path) -> bool {
-        std::unique_ptr<u8[]> data;
-        u32 len = 0;
-        if (!ReadFile(path, data, len) || len < 16) return false;
+    auto saveState = [&](int s, bool background) -> bool {
+        Savestate st;
+        if (st.Error) return false;
+        if (!nds->DoSavestate(&st) || st.Error) return false;
+        auto data = std::make_shared<std::vector<u8>>((u8*)st.Buffer(), (u8*)st.Buffer() + st.Length());
+        if (stateWriter.joinable()) stateWriter.join();   // one write at a time
+        cachedSlot = s;
+        cachedState = data;
+        std::string path = statePath(s);
+        if (!background) return writeStateFile(path, *data);
+        stateWriter = std::thread([path, data, s, writeStateFile, logf]() {
+            if (!writeStateFile(path, *data)) logf("state slot %d: writing the file FAILED\n", s);
+        });
+        return true;
+    };
+    auto loadState = [&](int s) -> bool {
+        std::shared_ptr<std::vector<u8>> data = s == cachedSlot ? cachedState : nullptr;
+        if (!data)
+        {
+            std::unique_ptr<u8[]> buf;
+            u32 len = 0;
+            if (!ReadFile(statePath(s), buf, len) || len < 16) return false;
+            data = std::make_shared<std::vector<u8>>(buf.get(), buf.get() + len);
+        }
         // keep the running state so that a bad file does not leave the emulator half-loaded
         Savestate backup;
         if (backup.Error || !nds->DoSavestate(&backup) || backup.Error) return false;
-        Savestate st(data.get(), len, false);
-        if (!st.Error && nds->DoSavestate(&st) && !st.Error) return true;
+        Savestate st(data->data(), (u32)data->size(), false);
+        if (!st.Error && nds->DoSavestate(&st) && !st.Error)
+        {
+            cachedSlot = s;
+            cachedState = data;
+            return true;
+        }
         Savestate restore(backup.Buffer(), backup.Length(), false);
         nds->DoSavestate(&restore);
         return false;
     };
     const bool autosave = !cfg.count("autosave") || cfg["autosave"] != "0";
+    bool stateLoaded = false;   // auto CPU mode: a state often lands in the middle of the action, go to 1785 MHz at once
     if (!cfg.count("autoload") || cfg["autoload"] != "0")
     {
         int loadSlot = cfg.count("loadslot") ? std::clamp(atoi(cfg["loadslot"].c_str()), 0, 4) : 0;   // slot loaded at start (0 = the automatic one)
@@ -995,11 +1023,17 @@ int main(int argc, char** argv)
         if (f)
         {
             fclose(f);
-            logf("autoload slot %d: %s\n", loadSlot, loadState(statePath(loadSlot)) ? "ok" : "FAILED");
+            stateLoaded = loadState(loadSlot);
+            logf("autoload slot %d: %s\n", loadSlot, stateLoaded ? "ok" : "FAILED");
         }
     }
     int slot = 1;
-    int lowFpsSeconds = 0;
+    // CPU auto mode: starts at 1224 MHz, raised to 1785 MHz as soon as the game falls behind (the last 30 frames took
+    // more than 540 ms, i.e. 3 missed refreshes in ~0.5 s; before: 3 s under 57 fps), lowered back to 1224 MHz after
+    // autoHold seconds at full speed. If the game falls behind within 10 s of a lowering, the hold time doubles (4 min max).
+    std::chrono::steady_clock::time_point autoFrameTimes[31];
+    int autoFrameCount = 0;   // frames recorded since the last reset (state loaded, menu, clock change)
+    int autoFastSeconds = 0, autoHold = 30, autoLoweredAt = -1000;
     double audioSkew = 1.0;
     // audio rate control: audioctl=1 (default) uses the queue level averaged over ~20 frames, audioctl=0 the raw level
     // of each frame (previous behaviour). audioskew=<ratio> fixes the rate (reference recordings).
@@ -1011,6 +1045,16 @@ int main(int argc, char** argv)
     std::vector<float> audioDumpSkew;
     bool audioDumpDone = audioDumpSec == 0;
     double audioQueueAvg = -1.0;
+    // the rate control aims at 100 ms of queued audio: after the queue is emptied (start, state loaded, menu closed), fill
+    // it with 100 ms of silence, otherwise the control stretched the sound (lower pitch, down to 0.7x) for about a second
+    // (250 ms at start, 200 ms after a state load or the menu: the next frame takes ~100 ms, the GL renderer reloading)
+    auto primeAudio = [&](int ms) {
+        if (!audio) return;
+        SDL_ClearQueuedAudio(audio);
+        std::vector<s16> silence((size_t)audioRate * ms / 1000 * 2, 0);
+        SDL_QueueAudio(audio, silence.data(), (u32)(silence.size() * sizeof(s16)));
+        audioQueueAvg = -1.0;
+    };
     if (audioDumpSec) audioDump.reserve((size_t)audioRate * 2 * audioDumpSec);
     logf("audio control %d, fixed skew %.4f, dump %d s\n", audioCtl, audioFixedSkew, audioDumpSec);
     u32 pad = 0;                      // raw SDL buttons held (bit = button number)
@@ -1100,7 +1144,9 @@ int main(int argc, char** argv)
                     idx = dir ? std::clamp(idx + dir, 0, 4) : (idx + 1) % 5;
                     autoClock = steps[idx] == 0;
                     overclockMHz = autoClock ? 1224 : steps[idx];
-                    lowFpsSeconds = 0;
+                    autoFrameCount = 0;
+                    autoFastSeconds = 0;
+                    autoHold = 30;
                     if (clkOk) clkrstSetClockRate(&cpuSession, (u32)overclockMHz * 1000000u);
                     saveUi();
                     break;
@@ -1129,15 +1175,15 @@ int main(int argc, char** argv)
                     break;
                 }
                 case 8: slot = dir ? std::clamp(slot + dir, 1, 4) : slot % 4 + 1; break;
-                case 9: if (act) { bool ok = saveState(statePath(slot)); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
-                case 10: if (act) { bool ok = loadState(statePath(slot)); logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
+                case 9: if (act) { bool ok = saveState(slot, true); logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État sauvegardé." : "Échec de la sauvegarde."; } break;
+                case 10: if (act) { bool ok = loadState(slot); stateLoaded |= ok; logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED"); note = ok ? "État chargé." : "Aucun état dans cet emplacement."; if (ok) result = 0; } break;
                 case 11: if (act) result = 1; break;
                 case 12: if (act) result = 2; break;
                 }
             }
         }
         DebugStage = prevStage;
-        if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); }
+        if (audio) { primeAudio(200); SDL_PauseAudioDevice(audio, 0); }
         return result < 0 ? 2 : result;
     };
 
@@ -1197,6 +1243,7 @@ int main(int argc, char** argv)
         logCv.notify_one();
     };
 
+    primeAudio(250);
     while (running && appletMainLoop())
     {
         SDL_Event ev;
@@ -1210,22 +1257,25 @@ int main(int argc, char** argv)
                 {
                     if (b == 2)
                     {
-                        bool ok = saveState(statePath(slot));
+                        bool ok = saveState(slot, true);
                         logf("save state slot %d: %s\n", slot, ok ? "ok" : "FAILED");
                         feedback(ok ? 40 : 220, ok ? 200 : 40, 40, slot);
                     }
                     else if (b == 3)
                     {
-                        bool ok = loadState(statePath(slot));
+                        bool ok = loadState(slot);
+                        stateLoaded |= ok;
                         logf("load state slot %d: %s\n", slot, ok ? "ok" : "FAILED");
-                        if (ok && audio) SDL_ClearQueuedAudio(audio);
+                        if (ok) primeAudio(200);
                         feedback(ok ? 50 : 220, ok ? 120 : 40, ok ? 230 : 40, slot);
+                        autoFrameCount = 0;
                     }
                     else if (b == 10)
                     {
                         int choice = runMenu();
                         pad = 0;
                         keys = 0;
+                        autoFrameCount = 0;   // the menu and the states it saves/loads stall frames
                         if (choice == 1) relaunch = true;
                         if (choice != 0) running = false;
                     }
@@ -1380,6 +1430,25 @@ int main(int argc, char** argv)
         }
 
         auto now = clock::now();
+        if (autoClock && stateLoaded && overclockMHz == 1785)
+            autoFastSeconds = 0;   // a state loaded at 1785 MHz restarts the hold time
+        if (autoClock)
+        {
+            autoFrameTimes[autoFrameCount % 31] = now;
+            autoFrameCount++;
+            // after the increment, the oldest of the last 31 timestamps (30 frame intervals) is at autoFrameCount % 31
+            bool behind = DebugFrames > 10 && autoFrameCount >= 31 && now - autoFrameTimes[autoFrameCount % 31] > std::chrono::milliseconds(540);
+            if (overclockMHz < 1785 && (behind || stateLoaded))
+            {
+                overclockMHz = 1785;
+                if (clkOk) clkrstSetClockRate(&cpuSession, 1785u * 1000000u);
+                if (behind && seconds - autoLoweredAt <= 10) autoHold = std::min(autoHold * 2, 240);
+                autoFrameCount = 0;
+                autoFastSeconds = 0;
+                logAsync("auto clock: %s, CPU raised to 1785 MHz (s%d, next hold %d s)\n", behind ? "game behind" : "state loaded", seconds, autoHold);
+            }
+        }
+        stateLoaded = false;
         if (now - secStart >= std::chrono::seconds(1))
         {
             seconds++;
@@ -1405,16 +1474,21 @@ int main(int argc, char** argv)
 enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, ProfGeom, ProfTimers };
 #endif
             logAsync("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15));
-            if (autoClock && overclockMHz < 1785)
+            if (autoClock && overclockMHz == 1785)
             {
-                lowFpsSeconds = frames < 57 ? lowFpsSeconds + 1 : 0;
-                if (lowFpsSeconds >= 3)
+                autoFastSeconds = frames >= 59 ? autoFastSeconds + 1 : 0;
+                if (autoFastSeconds >= autoHold)
                 {
-                    overclockMHz = 1785;
-                    if (clkOk) clkrstSetClockRate(&cpuSession, 1785u * 1000000u);
-                    logf("auto clock: %d fps for 3 s, CPU raised to 1785 MHz\n", frames);
+                    overclockMHz = 1224;
+                    if (clkOk) clkrstSetClockRate(&cpuSession, 1224u * 1000000u);
+                    autoLoweredAt = seconds;
+                    autoFrameCount = 0;
+                    autoFastSeconds = 0;
+                    logAsync("auto clock: %d s at full speed, CPU lowered to 1224 MHz (s%d)\n", autoHold, seconds);
                 }
             }
+            else if (autoClock && seconds - autoLoweredAt > 60)
+                autoHold = 30;
             if (seconds == 2)
             {
                 NWindow* nw = nwindowGetDefault();
@@ -1435,7 +1509,8 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
     }
 
     if (autosave)
-        logf("autosave slot 0: %s\n", saveState(statePath(0)) ? "ok" : "FAILED");
+        logf("autosave slot 0: %s\n", saveState(0, false) ? "ok" : "FAILED");
+    if (stateWriter.joinable()) stateWriter.join();
 
     watchdogStop = true;
     watchdog.join();
