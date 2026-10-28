@@ -37,6 +37,7 @@
 
 std::string SwitchSavePath;
 std::string SwitchLogPath;
+std::mutex SwitchLogMutex;
 
 namespace melonDS::Platform
 {
@@ -200,6 +201,7 @@ void Log(LogLevel level, const char* fmt, ...)
     if (level < LogLevel::Warn || SwitchLogPath.empty())
         return;
 
+    std::lock_guard<std::mutex> lock(SwitchLogMutex);
     FILE* file = fopen(SwitchLogPath.c_str(), "a");
     if (!file)
         return;

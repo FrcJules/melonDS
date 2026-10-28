@@ -68,6 +68,7 @@ namespace melonDS { extern u64 SwitchJitTransitions; extern u64 SwitchJitTransit
 
 extern std::string SwitchSavePath;
 extern std::string SwitchLogPath;
+extern std::mutex SwitchLogMutex;
 namespace melonDS::Platform { extern int SwitchHelperCore; }
 
 // where the main loop currently is, logged once per second by a watchdog thread (to locate hangs)
@@ -137,8 +138,9 @@ static u32 DSKeyForButton(int button)
 unsigned long long MelonGLProf[16];   // see PlatformOGL.h
 
 // sampling profiler (config sampler=<seconds>): a thread on core 2 (unused otherwise) pauses the emulation thread about
-// every 500 us, reads its PC and LR and resumes it; after a 5 s delay and <seconds> of sampling, the pairs are written
-// to samples.bin (u64 PC, u64 LR). Off by default.
+// every 500 us, reads its PC, LR and up to 6 return addresses from the frame-pointer chain (only inside the thread's
+// stack mapping), and resumes it; after a 5 s delay and <seconds> of sampling, the records are written to samples.bin
+// ("SMP2", then 8 x u64 per sample). Off by default.
 struct SamplerState
 {
     Handle Target = INVALID_HANDLE;
@@ -152,19 +154,40 @@ static void SamplerThread(void* arg)
     auto* st = (SamplerState*)arg;
     svcSleepThread(5000000000ll);
     u64 end = armGetSystemTick() + armNsToTicks((u64)st->Seconds * 1000000000ull);
+    u64 stackLo = 0, stackHi = 0;
     while (!st->Stop && armGetSystemTick() < end)
     {
         svcSleepThread(500000);
         if (R_FAILED(svcSetThreadActivity(st->Target, ThreadActivity_Paused))) { st->Failures++; continue; }
         ThreadContext ctx;
         Result rc = svcGetThreadContext3(&ctx, st->Target);
+        u64 rec[8] {};
+        if (R_SUCCEEDED(rc))
+        {
+            if (!stackHi)
+            {
+                MemoryInfo mi {}; u32 pi = 0;
+                if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, ctx.sp))) { stackLo = mi.addr; stackHi = mi.addr + mi.size; }
+            }
+            rec[0] = ctx.pc.x;
+            rec[1] = ctx.lr;
+            u64 fp = ctx.fp;
+            for (int i = 2; i < 8; i++)
+            {
+                if (fp < stackLo || fp + 16 > stackHi || (fp & 0xF)) break;
+                rec[i] = ((u64*)fp)[1];
+                u64 next = ((u64*)fp)[0];
+                if (next <= fp) break;
+                fp = next;
+            }
+        }
         svcSetThreadActivity(st->Target, ThreadActivity_Runnable);
         if (R_FAILED(rc)) { st->Failures++; continue; }
-        st->Samples.push_back(ctx.pc.x);
-        st->Samples.push_back(ctx.lr);
+        st->Samples.insert(st->Samples.end(), rec, rec + 8);
     }
     if (FILE* f = fopen("sdmc:/switch/melonds-fork/samples.bin", "wb"))
     {
+        fwrite("SMP2", 1, 4, f);
         fwrite(st->Samples.data(), sizeof(u64), st->Samples.size(), f);
         fclose(f);
     }
@@ -634,7 +657,10 @@ int main(int argc, char** argv)
     SwitchLogPath = std::string(ConfigDir) + "/log.txt";
     melonDS::SwitchCrashLogPath = SwitchLogPath.c_str();
     // the file is closed after every line: FAT only records its size on close, and the log must be readable while the app runs
+    // one lock for every writer of the log (main thread, statistics thread, Platform::Log): two appends at once
+    // would overwrite each other
     auto logf = [](const char* fmt, auto... a) {
+        std::lock_guard<std::mutex> lock(SwitchLogMutex);
         FILE* f = fopen(SwitchLogPath.c_str(), "a");
         if (!f) return;
         fprintf(f, fmt, a...);
@@ -915,7 +941,7 @@ int main(int argc, char** argv)
     {
         sampler.Target = threadGetCurHandle();
         sampler.Seconds = std::clamp(atoi(cfg["sampler"].c_str()), 1, 120);
-        sampler.Samples.reserve((size_t)sampler.Seconds * 2000 * 2);
+        sampler.Samples.reserve((size_t)sampler.Seconds * 2000 * 8);
         samplerOn = R_SUCCEEDED(threadCreate(&samplerThread, SamplerThread, &sampler, nullptr, 0x10000, 0x2B, 2)) && R_SUCCEEDED(threadStart(&samplerThread));
         logf("sampler: %s, %d s after a 5 s delay\n", samplerOn ? "started" : "FAILED to start", sampler.Seconds);
     }
@@ -1387,10 +1413,15 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
                     logf("auto clock: %d fps for 3 s, CPU raised to 1785 MHz\n", frames);
                 }
             }
+            if (seconds == 2)
+            {
+                NWindow* nw = nwindowGetDefault();
+                logf("window: %d buffers configured (mask 0x%llx), swap interval %u\n", __builtin_popcountll(nw->slots_configured), (unsigned long long)nw->slots_configured, nw->swap_interval);
+            }
             if (samplerOn && sampler.Done && !samplerLogged)
             {
                 samplerLogged = true;
-                logf("sampler: %u samples written, %llu failures\n", (unsigned)(sampler.Samples.size() / 2), (unsigned long long)sampler.Failures);
+                logf("sampler: %u samples written, %llu failures\n", (unsigned)(sampler.Samples.size() / 8), (unsigned long long)sampler.Failures);
             }
             memset(MelonGLProf, 0, sizeof(MelonGLProf));
 #if defined(MELONDS_PROF) && defined(__aarch64__)
