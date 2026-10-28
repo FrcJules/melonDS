@@ -199,6 +199,9 @@ bool GLRenderer2D::InitShaders(GLRenderer2D& other)
 
 bool GLRenderer2D::Init()
 {
+    PalShadowBGValid = false;
+    PalShadowOBJValid = false;
+
     // sprite prerender vertex data: 2x position, 1x sprite index
     int sprdatasize = (3 * 6) * 128;
     SpritePreVtxData = new u16[sprdatasize];
@@ -249,12 +252,12 @@ bool GLRenderer2D::Init()
     glGenTextures(1, &PalTex_BG);
     glBindTexture(GL_TEXTURE_2D, PalTex_BG);
     glDefaultTexParams(GL_TEXTURE_2D);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 1+(4*16), 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 1+(4*16), 0, GL_RGBA, MELONDS_RGB5A1_TYPE, nullptr);
 
     glGenTextures(1, &PalTex_OBJ);
     glBindTexture(GL_TEXTURE_2D, PalTex_OBJ);
     glDefaultTexParams(GL_TEXTURE_2D);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 1+16, 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 1+16, 0, GL_RGBA, MELONDS_RGB5A1_TYPE, nullptr);
 
     // generate texture to hold pre-rendered BG layers
 
@@ -401,6 +404,9 @@ GLRenderer2D::~GLRenderer2D()
 
 void GLRenderer2D::Reset()
 {
+    PalShadowBGValid = false;
+    PalShadowOBJValid = false;
+
     memset(BGLayerFB, 0, sizeof(BGLayerFB));
     memset(BGLayerTex, 0, sizeof(BGLayerTex));
 
@@ -514,6 +520,24 @@ bool GLRenderer2D::IsScreenOn()
 }
 
 
+void GLRenderer2D::UploadPalette(GLuint tex, const u16* cur, u16* shadow, bool& valid, int rows)
+{
+    // the callers rely on this texture being bound afterwards, even when nothing needs to be sent
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    int first = 0, last = rows - 1;
+    if (valid)
+    {
+        while (first <= last && !memcmp(&cur[first * 256], &shadow[first * 256], 256 * 2)) first++;
+        if (first > last) return;                 // identical to what the GPU already has
+        while (last > first && !memcmp(&cur[last * 256], &shadow[last * 256], 256 * 2)) last--;
+    }
+
+    MELONDS_TEXSUBIMAGE_PALETTE(first, 256, last - first + 1, &cur[first * 256]);
+    memcpy(&shadow[first * 256], &cur[first * 256], (last - first + 1) * 256 * 2);
+    valid = true;
+}
+
 void GLRenderer2D::UpdateAndRender(int line)
 {
     u32 palmask = 1 << (GPU2D.Num * 2);
@@ -574,6 +598,7 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     if (screenon)
     {
+        GL_PROF(4);
         if (GPU2D.Num == 0)
         {
             bgDirty = GPU.VRAMDirty_ABG.DeriveState(GPU.VRAMMap_ABG, GPU);
@@ -650,6 +675,7 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     if ((comp_dirty || SpriteDirty) && (line > 0))
     {
+        GL_PROF(5);
         DoRenderSprites(line);
     }
 
@@ -657,6 +683,7 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     if (comp_dirty && (line > 0))
     {
+        GL_PROF(5);
         RenderScreen(LastLine, line);
         LastLine = line;
     }
@@ -678,13 +705,18 @@ void GLRenderer2D::UpdateAndRender(int line)
     if (layer_pre_dirty || LayerConfigDirty)
         UpdateLayerConfig();
 
-    UpdateScanlineConfig(line);
+    {
+        GL_PROF(6);
+        UpdateScanlineConfig(line);
+    }
 
     // update VRAM and palettes
+    GL_PROF(7);
 
     int dirtybits = GPU2D.Num ? 256 : 1024;
     if (bgDirty.CheckRange(0, dirtybits))
     {
+        GL_PROF(8);
         // TODO: only do it for active layers?
         // this would require keeping track of the dirty state for areas not included in any layer
 
@@ -722,25 +754,30 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     if ((GPU.PaletteDirty & palmask) || bgExtPalDirty.CheckRange(0, 64))
     {
-        memcpy(&TempPalBuffer[0], &GPU.Palette[GPU2D.Num ? 0x400 : 0], 256*2);
-        for (int s = 0; s < 4; s++)
+        GL_PROF(9);
+        GL_COUNT(13);
         {
-            for (int p = 0; p < 16; p++)
+            GL_PROF(14);
+            memcpy(&TempPalBuffer[0], &GPU.Palette[GPU2D.Num ? 0x400 : 0], 256*2);
+            for (int s = 0; s < 4; s++)
             {
-                u16 *pal = GPU2D.GetBGExtPal(s, p);
-                memcpy(&TempPalBuffer[(1 + ((s*16)+p)) * 256], pal, 256*2);
+                for (int p = 0; p < 16; p++)
+                {
+                    u16 *pal = GPU2D.GetBGExtPal(s, p);
+                    memcpy(&TempPalBuffer[(1 + ((s*16)+p)) * 256], pal, 256*2);
+                }
             }
         }
 
-        glBindTexture(GL_TEXTURE_2D, PalTex_BG);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1+(4*16), GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV,
-                        TempPalBuffer);
+        GL_PROF(15);
+        UploadPalette(PalTex_BG, TempPalBuffer, PalShadowBG, PalShadowBGValid, 1+(4*16));
     }
 
     GPU.PaletteDirty &= ~palmask;
 
     if (layer_pre_dirty)
     {
+        GL_PROF(10);
         // pre-render BG layers with the new settings
 
         glUseProgram(LayerPreShader);
@@ -769,6 +806,8 @@ void GLRenderer2D::UpdateAndRender(int line)
 
     if (SpriteDirty)
     {
+        GL_PROF(11);
+        GL_COUNT(12);
         // OAM and VRAM have already been updated prior
         // palette needs to be updated here though
 
@@ -787,8 +826,7 @@ void GLRenderer2D::UpdateAndRender(int line)
         }
 
         glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, PalTex_OBJ);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1+16, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, TempPalBuffer);
+        UploadPalette(PalTex_OBJ, TempPalBuffer, PalShadowOBJ, PalShadowOBJValid, 1+16);
 
         PrerenderSprites();
 
