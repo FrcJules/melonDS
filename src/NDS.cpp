@@ -44,6 +44,11 @@
 #include "DSi_DSP.h"
 #include "ARMJIT.h"
 #include "ARMJIT_Memory.h"
+#include "Prof.h"
+
+#if defined(MELONDS_PROF) && defined(__aarch64__)
+unsigned long long MelonProf[16];
+#endif
 
 namespace melonDS
 {
@@ -855,7 +860,9 @@ void NDS::RunSystem(u64 timestamp)
                 SchedListMask &= ~(1<<i);
 
                 EventFunc func = evt.Funcs[evt.FuncID];
+                PROF_BEGIN();
                 func(evt.That, evt.Param);
+                PROF_END(i == Event_LCD ? ProfEvtLCD : i == Event_SPU ? ProfEvtSPU : ProfEvtOther);
             }
         }
 
@@ -982,6 +989,7 @@ u32 NDS::RunFrame()
                 u64 target = NextTarget();
                 ARM9Target = target << ARM9ClockShift;
                 CurCPU = 0;
+                PROF_BEGIN();
 
                 if (CPUStop & CPUStop_GXStall)
                 {
@@ -1007,11 +1015,17 @@ u32 NDS::RunFrame()
                     ARM9.Execute<cpuMode>();
                 }
 
+                PROF_END(ProfARM9);
+                PROF_RESTART();
                 RunTimers(0);
+                PROF_END(ProfTimers);
+                PROF_RESTART();
                 GPU.GPU3D.Run();
+                PROF_END(ProfGeom);
 
                 target = ARM9Timestamp >> ARM9ClockShift;
                 CurCPU = 1;
+                PROF_RESTART();
 
                 while (ARM7Timestamp < target)
                 {
@@ -1034,7 +1048,11 @@ u32 NDS::RunFrame()
                         ARM7.Execute<cpuMode>();
                     }
 
+                    PROF_END(ProfARM7);
+                    PROF_RESTART();
                     RunTimers(1);
+                    PROF_END(ProfTimers);
+                    PROF_RESTART();
                 }
 
                 RunSystem(target);
