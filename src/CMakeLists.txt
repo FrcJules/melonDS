@@ -251,3 +251,8 @@ endif()
 #  )
 #endif()
 
+
+# GCC 15.2 crashes (internal compiler error in expand_expr_real_2) compiling DMA.cpp with -flto: build that file without LTO
+if (MELONDS_LTO_EXCLUDE_DMA)
+    set_source_files_properties(DMA.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
+endif()
