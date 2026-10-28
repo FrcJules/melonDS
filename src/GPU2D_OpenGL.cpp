@@ -684,6 +684,7 @@ void GLRenderer2D::UpdateAndRender(int line)
     if (comp_dirty && (line > 0))
     {
         GL_PROF(5);
+        GL_SECTION_COUNT();
         RenderScreen(LastLine, line);
         LastLine = line;
     }

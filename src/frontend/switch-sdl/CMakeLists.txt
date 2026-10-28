@@ -22,6 +22,9 @@ if (ENABLE_OGLRENDERER)
     target_include_directories(core PUBLIC $ENV{DEVKITPRO}/portlibs/switch/include)
 endif()
 
+# GL 2D renderer: count of mid-frame screen sections (main.cpp switches heavy games to software rendering)
+target_compile_definitions(core PUBLIC MELONDS_GL_SECTION_COUNT)
+
 # one emulator instance, always run from the main thread (see NDS::Current)
 target_compile_definitions(core PUBLIC MELONDS_SINGLE_NDS_THREAD)
 

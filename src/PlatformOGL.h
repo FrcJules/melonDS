@@ -31,6 +31,15 @@ struct MelonGLProfScope
 #define GL_COUNT(index)
 #endif
 
+#ifdef MELONDS_GL_SECTION_COUNT
+// screen sections composited before VBlank by the GL 2D renderer (games that change display registers mid-frame),
+// read and reset by the frontend
+extern unsigned MelonGL2DSections;
+#define GL_SECTION_COUNT() (MelonGL2DSections++)
+#else
+#define GL_SECTION_COUNT()
+#endif
+
 #ifdef MELONDS_GLES
 // OpenGL ES 3.0 / WebGL2 compatibility: the renderers are written for desktop OpenGL 3.1,
 // these definitions cover the (few) desktop-only calls they use.

@@ -138,6 +138,7 @@ static u32 DSKeyForButton(int button)
 
 
 unsigned long long MelonGLProf[16];   // see PlatformOGL.h
+unsigned MelonGL2DSections = 0;       // see PlatformOGL.h
 
 // sampling profiler (config sampler=<seconds>): a thread on core 2 (unused otherwise) pauses the emulation thread about
 // every 500 us, reads its PC, LR and up to 6 return addresses from the frame-pointer chain (only inside the thread's
@@ -764,10 +765,20 @@ int main(int argc, char** argv)
     int layout = ui.count("layout") ? atoi(ui["layout"].c_str()) : 0;     // 0 stacked, 1 side by side
     int filter = ui.count("filter") ? atoi(ui["filter"].c_str()) : 0;     // 0 sharp pixels, 1 smooth
     bool showFps = ui.count("showfps") && ui["showfps"] == "1";
+    // display settings are global (ui.txt); renderer, resolution and CPU chosen in the menu are saved for the running
+    // game (<rom>.ui), ui.txt keeps them as the defaults of the other games
+    std::string gameUiFile;
     auto saveUi = [&]() {
         FILE* f = fopen((std::string(ConfigDir) + "/ui.txt").c_str(), "w");
         if (!f) return;
-        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\ncpu=%d\nthreaded=%d\ngpu=%d\ngpuscale=%d\n", layout, filter, showFps ? 1 : 0, autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0, useGpu ? 1 : 0, gpuScale);
+        fprintf(f, "layout=%d\nfilter=%d\nshowfps=%d\n", layout, filter, showFps ? 1 : 0);
+        for (const char* k : {"cpu", "threaded", "gpu", "gpuscale"})
+            if (ui0.count(k)) fprintf(f, "%s=%s\n", k, ui0[k].c_str());
+        fclose(f);
+        if (gameUiFile.empty()) return;
+        f = fopen((std::string(ConfigDir) + "/" + gameUiFile).c_str(), "w");
+        if (!f) return;
+        fprintf(f, "cpu=%d\nthreaded=%d\ngpu=%d\ngpuscale=%d\n", autoClock ? 0 : overclockMHz, threaded3d ? 1 : 0, useGpu ? 1 : 0, gpuScale);
         fclose(f);
     };
 
@@ -840,6 +851,32 @@ int main(int argc, char** argv)
     {
         logf("cannot read rom %s\n", romPath.c_str());
         return 1;
+    }
+
+    // per-game settings: <rom>.ui (menu choices made while this game runs) > built-in defaults for games known to need
+    // them > ui.txt; config.txt still wins. Built-in: 4th generation Pokemon in software rendering (the GL renderer leaves
+    // dotted black lines between map polygons, upstream issue #458; software holds 60 fps at 1224 MHz on HeartGold)
+    gameUiFile = StripExt(BaseName(romPath)) + ".ui";
+    {
+        auto gu = ReadConfig(gameUiFile.c_str());
+        const bool fromFile = !gu.empty();
+        char code[5] = {};
+        if (romLen >= 0x10) memcpy(code, romData.get() + 0x0C, 4);
+        bool builtinSoft = false;
+        for (const char* c : {"ADA", "APA", "CPU", "IPK", "IPG"})   // Diamond, Pearl, Platinum, HeartGold, SoulSilver
+            if (!strncmp(code, c, 3)) builtinSoft = true;
+        if (builtinSoft && !gu.count("gpu")) gu["gpu"] = "0";
+        if (!cfg.count("gpu") && gu.count("gpu")) useGpu = gu["gpu"] == "1";
+        if (!cfg.count("gpuscale") && gu.count("gpuscale")) gpuScale = std::clamp(atoi(gu["gpuscale"].c_str()), 1, 3);
+        if (!cfg.count("threaded3d") && gu.count("threaded")) threaded3d = gu["threaded"] == "1";
+        if (!cfg.count("overclock") && gu.count("cpu"))
+        {
+            int mhz = atoi(gu["cpu"].c_str());
+            autoClock = mhz == 0;
+            overclockMHz = autoClock ? 1224 : mhz;
+            if (clkOk) clkrstSetClockRate(&cpuSession, (u32)overclockMHz * 1000000u);
+        }
+        logf("game %s: %s%s, gpu=%d scale=%d cpu=%d%s\n", code, fromFile ? gameUiFile.c_str() : "global settings", builtinSoft ? " (built-in: software rendering)" : "", (int)useGpu, gpuScale, overclockMHz, autoClock ? " auto" : "");
     }
 
     NDSArgs args;
@@ -958,6 +995,8 @@ int main(int argc, char** argv)
     };
     computeLayout();
     GfxTex fpsTex;
+    GfxTex noteTex;   // short message at the bottom of the screen (5 s)
+    auto noteUntil = std::chrono::steady_clock::now();
     bool relaunch = false;
 
     // save states
@@ -1039,6 +1078,10 @@ int main(int argc, char** argv)
     // CPU time of the emulation thread (ticks at 19.2 MHz, waits in the GPU driver/vsync excluded), per second, in 1/1000
     u64 busyTicks0 = 0;   // read at the first second (the first value is not used)
     int busyPermille = 0;
+    // GL renderer: games that change display registers mid-frame (Professor Layton videos: ~14 sections per screen and
+    // per frame, 17-25 fps at 1785 MHz; software rendering: 60 fps at 1020 MHz) are switched to software rendering, and
+    // the choice is saved for the game
+    int sectionsTenths = 0, heavySectionSeconds = 0;
     double audioSkew = 1.0;
     // audio rate control: audioctl=1 (default) uses the queue level averaged over ~20 frames, audioctl=0 the raw level
     // of each frame (previous behaviour). audioskew=<ratio> fixes the rate (reference recordings).
@@ -1393,6 +1436,13 @@ int main(int argc, char** argv)
         else if (top)
             gpuTex = *(GLuint*)top;
         drawScreens();
+        if (noteTex.Id && clock::now() < noteUntil)
+        {
+            SDL_Rect d {16, 720 - noteTex.H - 8, noteTex.W, noteTex.H};
+            GfxBlendMode(renderer, true);
+            GfxCopy(renderer, &noteTex, nullptr, &d, 2);
+            GfxBlendMode(renderer, false);
+        }
         if (showFps && fpsTex.Id)
         {
             SDL_Rect d {1280 - fpsTex.W - 16, 8, fpsTex.W, fpsTex.H};
@@ -1524,6 +1574,29 @@ int main(int argc, char** argv)
                     busyTicks0 = t;
                 }
             }
+            sectionsTenths = (int)(MelonGL2DSections * 10 / std::max(frames, 1));
+            MelonGL2DSections = 0;
+            heavySectionSeconds = (useGpu && sectionsTenths >= 80) ? heavySectionSeconds + 1 : 0;
+            if (heavySectionSeconds >= 2 && !cfg.count("gpu"))
+            {
+                heavySectionSeconds = 0;
+                if (applyRenderer(false))
+                {
+                    useGpu = false;
+                    gpuTex = 0;
+                    saveUi();
+                    logAsync("renderer: %d.%d screen sections per frame, switched to software rendering for this game\n", sectionsTenths / 10, sectionsTenths % 10);
+                    GfxTexDestroy(&noteTex);
+                    if (UIFont)
+                        if (SDL_Surface* sf = TTF_RenderUTF8_Blended(UIFont, "Rendu logiciel pour ce jeu (plus rapide ici), réglable dans le menu", SDL_Color {255, 230, 120, 255}))
+                        {
+                            noteTex = GfxTexFromSurface(sf);
+                            SDL_FreeSurface(sf);
+                        }
+                    noteUntil = now + std::chrono::seconds(5);
+                }
+                else applyRenderer(true);
+            }
             if (showFps && UIFont)
             {
                 char buf[32];
@@ -1545,7 +1618,7 @@ int main(int argc, char** argv)
 #define P(c) 0ull
 enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, ProfGeom, ProfTimers };
 #endif
-            logAsync("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu busy=%d\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15), busyPermille);
+            logAsync("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu busy=%d sect=%d\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15), busyPermille, sectionsTenths);
             if (autoClock && overclockMHz == 1785)
             {
                 // a second counts only with headroom: under 60 % of CPU time at 1785 MHz is ~84 % at 1224 MHz (measured ratio
