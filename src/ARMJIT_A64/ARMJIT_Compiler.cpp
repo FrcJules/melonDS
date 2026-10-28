@@ -206,44 +206,71 @@ void Compiler::PopRegs(bool saveHiRegs, bool saveRegsToBeChanged)
     }
 }
 
+#ifdef __SWITCH__
+// size of the JIT code region
+static constexpr size_t SwitchJitSize = 32 * 1024 * 1024;
+#endif
+
 Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
 {
 #ifdef __SWITCH__
-    JitRWBase = aligned_alloc(0x1000, JitMemSize);
+    ARMJIT_Global::Init();
 
-    JitRXStart = (u8*)&__start__ - JitMemSize - 0x1000;
-    virtmemLock();
-    JitRWStart = virtmemFindAslr(JitMemSize, 0x1000);
-    MemoryInfo info = {0};
-    u32 pageInfo = {0};
-    int i = 0;
-    while (JitRXStart != NULL)
+    // map the same memory twice: RW view for the emitter, RX view for execution. This needs
+    // svcMapProcessCodeMemory (Atmosphere, application mode), otherwise fall back to the libnx Jit
+    // object, where every compiled block costs two whole-region transitions (about 2 ms each)
+    JitDual = false;
+    JitRWBase = aligned_alloc(0x1000, SwitchJitSize);
+    if (JitRWBase)
     {
-        svcQueryMemory(&info, &pageInfo, (u64)JitRXStart);
-        if (info.type != MemType_Unmapped)
-            JitRXStart = (void*)((u8*)info.addr - JitMemSize - 0x1000);
-        else
-            break;
-        if (i++ > 8)
+        Handle self = envGetOwnProcessHandle();
+        virtmemLock();
+        void* rx = virtmemFindCodeMemory(SwitchJitSize, 0x1000);
+        void* rwAlias = virtmemFindAslr(SwitchJitSize, 0x1000);
+        bool ok = rx && rwAlias
+            && R_SUCCEEDED(svcMapProcessCodeMemory(self, (u64)rx, (u64)JitRWBase, SwitchJitSize));
+        if (ok && !R_SUCCEEDED(svcSetProcessMemoryPermission(self, (u64)rx, SwitchJitSize, Perm_Rx)))
         {
-            Log(LogLevel::Error, "couldn't find unmapped place for jit memory\n");
-            JitRXStart = NULL;
+            svcUnmapProcessCodeMemory(self, (u64)rx, (u64)JitRWBase, SwitchJitSize);
+            ok = false;
+        }
+        if (ok && !R_SUCCEEDED(svcMapProcessMemory(rwAlias, self, (u64)rx, SwitchJitSize)))
+        {
+            svcUnmapProcessCodeMemory(self, (u64)rx, (u64)JitRWBase, SwitchJitSize);
+            ok = false;
+        }
+        virtmemUnlock();
+        if (ok)
+        {
+            JitRXStart = rx;
+            JitRWStart = rwAlias;
+            JitDual = true;
         }
     }
 
-    assert(JitRXStart != NULL);
+    if (JitDual)
+    {
+        Log(LogLevel::Warn, "JIT code memory: dual mapping (RW %p, RX %p)\n", JitRWStart, JitRXStart);
+        CodeMemBase = JitRWStart;
+        SetCodeBase(reinterpret_cast<u8*>(JitRWStart), reinterpret_cast<u8*>(JitRXStart));
+    }
+    else
+    {
+        free(JitRWBase);
+        JitRWBase = nullptr;
 
-    bool succeded = R_SUCCEEDED(svcMapProcessCodeMemory(envGetOwnProcessHandle(), (u64)JitRXStart, (u64)JitRWBase, JitMemSize));
-    assert(succeded);
-    succeded = R_SUCCEEDED(svcSetProcessMemoryPermission(envGetOwnProcessHandle(), (u64)JitRXStart, JitMemSize, Perm_Rx));
-    assert(succeded);
-    succeded = R_SUCCEEDED(svcMapProcessMemory(JitRWStart, envGetOwnProcessHandle(), (u64)JitRXStart, JitMemSize));
-    assert(succeded);
-
-    virtmemUnlock();
-
-    SetCodeBase((u8*)JitRWStart, (u8*)JitRXStart);
-    JitMemMainSize = JitMemSize;
+        Result jitResult = jitCreate(&JitObj, SwitchJitSize);
+        if (R_FAILED(jitResult))
+        {
+            Log(LogLevel::Error, "jitCreate failed: 0x%x\n", jitResult);
+            abort();
+        }
+        Log(LogLevel::Warn, "JIT code memory: libnx Jit fallback (slow)\n");
+        JitIsWritable = true;
+        CodeMemBase = jitGetRwAddr(&JitObj);
+        SetCodeBase(reinterpret_cast<u8*>(jitGetRwAddr(&JitObj)), reinterpret_cast<u8*>(jitGetRxAddr(&JitObj)));
+    }
+    JitMemMainSize = SwitchJitSize;
 #else
     ARMJIT_Global::Init();
 
@@ -450,16 +477,43 @@ Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
     SetCodeBase((u8*)GetRWPtr(), (u8*)GetRXPtr());
 }
 
+#ifdef __SWITCH__
+// statistics read by the Switch frontend
+u64 SwitchJitTransitions = 0;
+u64 SwitchJitTransitionNs = 0;
+
+void Compiler::SetJitWritable(bool writable)
+{
+    if (JitDual || writable == JitIsWritable)
+        return;
+
+    u64 t0 = armTicksToNs(armGetSystemTick());
+    Result rc = writable ? jitTransitionToWritable(&JitObj) : jitTransitionToExecutable(&JitObj);
+    SwitchJitTransitionNs += armTicksToNs(armGetSystemTick()) - t0;
+    SwitchJitTransitions++;
+    if (R_FAILED(rc))
+    {
+        Log(LogLevel::Error, "JIT transition (writable=%d) failed: 0x%x\n", writable, rc);
+        abort();
+    }
+    JitIsWritable = writable;
+}
+#endif
+
 Compiler::~Compiler()
 {
 #ifdef __SWITCH__
-    if (JitRWStart != NULL)
+    if (JitDual)
     {
-        bool succeded = R_SUCCEEDED(svcUnmapProcessMemory(JitRWStart, envGetOwnProcessHandle(), (u64)JitRXStart, JitMemSize));
-        assert(succeded);
-        succeded = R_SUCCEEDED(svcUnmapProcessCodeMemory(envGetOwnProcessHandle(), (u64)JitRXStart, (u64)JitRWBase, JitMemSize));
-        assert(succeded);
+        Handle self = envGetOwnProcessHandle();
+        svcUnmapProcessMemory(JitRWStart, self, (u64)JitRXStart, SwitchJitSize);
+        svcUnmapProcessCodeMemory(self, (u64)JitRXStart, (u64)JitRWBase, SwitchJitSize);
         free(JitRWBase);
+    }
+    else
+    {
+        SetJitWritable(true);
+        jitClose(&JitObj);
     }
 #endif
 

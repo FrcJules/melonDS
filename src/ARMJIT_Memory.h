@@ -27,6 +27,7 @@
 #  include "TinyVector.h"
 #  include "ARM.h"
 #  if defined(__SWITCH__)
+#    include <stdlib.h>
 #    include <switch.h>
 #  elif defined(_WIN32)
 #    include <vector>
@@ -140,6 +141,10 @@ public:
     bool MapAtAddress(u32 addr) noexcept;
 
     static bool IsFastMemSupported();
+#ifdef __SWITCH__
+    // called from __libnx_exception_handler: true if the fault was handled (pc is then the address to resume at)
+    static bool HandleSwitchFault(u64 faultAddr, u8*& pc) noexcept;
+#endif
 
     static void RegisterFaultHandler();
     static void UnregisterFaultHandler();
@@ -173,8 +178,12 @@ private:
     u8* MemoryBase = nullptr;
 
 #if defined(__SWITCH__)
-    VirtmemReservation* FastMem9Reservation, *FastMem7Reservation;
-    u8* MemoryBaseCodeMem;
+    // MemoryBase is a heap allocation, MemoryBaseCodeMem is a second (RW) view of the same pages
+    // that is mapped piecewise into the two 4 GB fastmem windows
+    u8* MemoryBaseCodeMem = nullptr;
+    u8* MemoryHeapBase = nullptr; // the allocation behind MemoryBaseCodeMem (inaccessible while mapped there)
+    VirtmemReservation* FastMem9Reservation = nullptr;
+    VirtmemReservation* FastMem7Reservation = nullptr;
 #elif defined(_WIN32)
     struct VirtmemPlaceholder
     {
