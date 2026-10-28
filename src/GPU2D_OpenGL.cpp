@@ -1906,15 +1906,21 @@ void GLRenderer2D::DrawSprites(u32 line)
     u8* vram; u32 vrammask;
     GPU2D.GetOBJVRAM(vram, vrammask);
 
-    glBindTexture(GL_TEXTURE_2D, VRAMTex_OBJ);
-
     int texlen = (GPU2D.Num ? 256 : 512) >> 6;
+    bool bound = false;
     for (int i = 0; i < texlen; )
     {
         if (!objDirty.Data[i])
         {
             i++;
             continue;
+        }
+
+        // bind only when something is uploaded (this runs for every scanline)
+        if (!bound)
+        {
+            glBindTexture(GL_TEXTURE_2D, VRAMTex_OBJ);
+            bound = true;
         }
 
         int start = i * 32;
