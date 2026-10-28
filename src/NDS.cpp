@@ -49,7 +49,6 @@ namespace melonDS
 {
 using namespace Platform;
 
-const s32 kMaxIterationCycles = 64;
 const s32 kIterationCycleMargin = 8;
 
 // timing notes
@@ -830,7 +829,7 @@ u64 NDS::NextTarget()
         mask >>= 1;
     }
 
-    u64 max = SysTimestamp + kMaxIterationCycles;
+    u64 max = SysTimestamp + MaxIterationCycles;
 
     if (minEvent < max + kIterationCycleMargin)
         return minEvent;
