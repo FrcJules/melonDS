@@ -1234,7 +1234,9 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
                 }
             }
             memset(MelonGLProf, 0, sizeof(MelonGLProf));
+#if defined(MELONDS_PROF) && defined(__aarch64__)
             memset(MelonProf, 0, sizeof(MelonProf));
+#endif
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }

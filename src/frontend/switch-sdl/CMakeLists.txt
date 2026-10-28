@@ -10,14 +10,22 @@ add_executable(melonDS-switch
     Platform.cpp
 )
 
+# timing profilers (prof=/glprof= columns of the log); they read the system counter in the hot loops
+option(SWITCH_PROFILE "Build the emulation-loop and GL profilers (MELONDS_PROF, MELONDS_GL_PROFILE)" ON)
+
 if (ENABLE_OGLRENDERER)
     # GLES 3 renderer (Mesa/nouveau on the console): same definitions as the WebGL build
-    target_compile_definitions(core PUBLIC "MELONDS_GL_HEADER=<GLES3/gl3.h>" MELONDS_GLES MELONDS_GL_PROFILE)
+    target_compile_definitions(core PUBLIC "MELONDS_GL_HEADER=<GLES3/gl3.h>" MELONDS_GLES)
+    if (SWITCH_PROFILE)
+        target_compile_definitions(core PUBLIC MELONDS_GL_PROFILE)
+    endif()
     target_include_directories(core PUBLIC $ENV{DEVKITPRO}/portlibs/switch/include)
 endif()
 
 # optional timing of the emulation loop (src/Prof.h), read by main.cpp
-target_compile_definitions(core PUBLIC MELONDS_PROF)
+if (SWITCH_PROFILE)
+    target_compile_definitions(core PUBLIC MELONDS_PROF)
+endif()
 
 target_include_directories(melonDS-switch PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(melonDS-switch PRIVATE core Threads::Threads SDL2_ttf freetype harfbuzz png16 bz2 z ${SDL2_LIBRARIES} EGL GLESv2 glapi drm_nouveau nx)
