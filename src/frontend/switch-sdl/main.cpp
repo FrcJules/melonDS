@@ -19,7 +19,7 @@
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
-//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 64; larger = faster but coarser ARM9/ARM7 interleaving)
+//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 128; melonDS uses 64)   audioctl=0|1   audioskew=<ratio>   audiodump=<seconds>
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
@@ -781,11 +781,9 @@ int main(int argc, char** argv)
     logf("audio interpolation: %d\n", (int)args.Interpolation);
     DebugStage = 10;
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);
-    if (cfg.count("itercycles"))
-    {
-        nds->MaxIterationCycles = std::clamp(atoi(cfg["itercycles"].c_str()), 16, 512);
-        logf("main loop iteration: %d cycles (default 64)\n", (int)nds->MaxIterationCycles);
-    }
+    // main-loop step: 128 cycles here (melonDS uses 64), about +2 to +4 fps; events still fire at their exact time
+    nds->MaxIterationCycles = cfg.count("itercycles") ? std::clamp(atoi(cfg["itercycles"].c_str()), 16, 512) : 128;
+    logf("main loop iteration: %d cycles\n", (int)nds->MaxIterationCycles);
     logf("addrs: main=%llx win9=%llx win7=%llx codemem=%llx\n", (unsigned long long)(u64)&main, (unsigned long long)SwitchDbgWin9, (unsigned long long)SwitchDbgWin7, (unsigned long long)SwitchDbgCodeMem);
     memlog("after NDS");
 
@@ -915,6 +913,18 @@ int main(int argc, char** argv)
     int slot = 1;
     int lowFpsSeconds = 0;
     double audioSkew = 1.0;
+    // audio rate control: audioctl=1 (default) uses the queue level averaged over ~20 frames, audioctl=0 the raw level
+    // of each frame (previous behaviour). audioskew=<ratio> fixes the rate (reference recordings).
+    // audiodump=<seconds>: records what is sent to the speaker (dump.wav) and the per-frame rate (dump-skew.txt)
+    const int audioCtl = cfg.count("audioctl") ? atoi(cfg["audioctl"].c_str()) : 1;
+    const double audioFixedSkew = cfg.count("audioskew") ? atof(cfg["audioskew"].c_str()) : 0.0;
+    const int audioDumpSec = cfg.count("audiodump") ? std::clamp(atoi(cfg["audiodump"].c_str()), 0, 120) : 0;
+    std::vector<s16> audioDump;
+    std::vector<float> audioDumpSkew;
+    bool audioDumpDone = audioDumpSec == 0;
+    double audioQueueAvg = -1.0;
+    if (audioDumpSec) audioDump.reserve((size_t)audioRate * 2 * audioDumpSec);
+    logf("audio control %d, fixed skew %.4f, dump %d s\n", audioCtl, audioFixedSkew, audioDumpSec);
     u32 pad = 0;                      // raw SDL buttons held (bit = button number)
     u8 fbR = 0, fbG = 0, fbB = 0;     // feedback colour of the last state action
     int fbSlot = 0;
@@ -1174,10 +1184,24 @@ int main(int argc, char** argv)
         {
             if (SDL_GetQueuedAudioSize(audio) == 0) audioUnderruns++;
             double queuedMs = SDL_GetQueuedAudioSize(audio) / 4.0 * 1000.0 / audioRate;
-            double err = std::clamp((queuedMs - 100.0) / 100.0, -1.0, 1.0);
-            // queue too full: drop a little audio (+0.4% at most); queue running dry (emulation slower than real time):
-            // stretch the audio instead of letting it underrun (pitch drops a little, no crackling)
-            audioSkew = std::max(1.0029 + (err >= 0 ? 0.004 * err : 0.5 * err), 0.7);
+            if (audioFixedSkew > 0)
+                audioSkew = audioFixedSkew;
+            else if (audioCtl == 0)
+            {
+                double err = std::clamp((queuedMs - 100.0) / 100.0, -1.0, 1.0);
+                // queue too full: drop a little audio (+0.4% at most); queue running dry (emulation slower than real time):
+                // stretch the audio instead of letting it underrun (pitch drops a little, no crackling)
+                audioSkew = std::max(1.0029 + (err >= 0 ? 0.004 * err : 0.5 * err), 0.7);
+            }
+            else
+            {
+                // same law, applied to the queue level averaged over ~20 frames: SDL drains its queue in 1024-sample
+                // blocks, so the raw level is a 21 ms sawtooth, which made the rate (pitch) jump by up to ~3% from one
+                // frame to the next whenever the emulation ran below 60 fps (simulation: work/sim_audioctl2.py)
+                audioQueueAvg = audioQueueAvg < 0 ? queuedMs : audioQueueAvg + (queuedMs - audioQueueAvg) * 0.05;
+                double err = std::clamp((audioQueueAvg - 100.0) / 100.0, -1.0, 1.0);
+                audioSkew = std::max(1.0029 + (err >= 0 ? 0.004 * err : 0.5 * err), 0.7);
+            }
             nds->SPU.SetOutputSkew(audioSkew);
         }
         for (;;)
@@ -1188,9 +1212,39 @@ int main(int argc, char** argv)
             n = nds->SPU.ReadOutput(audioBuf.data(), n);
             if (n <= 0) break;
             if (audio && SDL_GetQueuedAudioSize(audio) < (u32)audioRate * 4 * 400 / 1000)
+            {
                 SDL_QueueAudio(audio, audioBuf.data(), n * 2 * sizeof(s16));
+                if (!audioDumpDone) audioDump.insert(audioDump.end(), audioBuf.data(), audioBuf.data() + n * 2);
+            }
             else
                 audioDrops++;
+        }
+
+        if (!audioDumpDone)
+        {
+            audioDumpSkew.push_back((float)audioSkew);
+            if (audioDump.size() >= (size_t)audioRate * 2 * audioDumpSec)
+            {
+                audioDumpDone = true;
+                std::string base = std::string(ConfigDir) + "/dump";
+                if (FILE* f = fopen((base + ".wav").c_str(), "wb"))
+                {
+                    u32 bytes = audioDump.size() * 2, rate = audioRate, brate = audioRate * 4, riff = 36 + bytes, fmtLen = 16;
+                    u16 pcm = 1, ch = 2, align = 4, bits = 16;
+                    fwrite("RIFF", 1, 4, f); fwrite(&riff, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&fmtLen, 4, 1, f);
+                    fwrite(&pcm, 2, 1, f); fwrite(&ch, 2, 1, f); fwrite(&rate, 4, 1, f); fwrite(&brate, 4, 1, f);
+                    fwrite(&align, 2, 1, f); fwrite(&bits, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&bytes, 4, 1, f);
+                    fwrite(audioDump.data(), 2, audioDump.size(), f);
+                    fclose(f);
+                }
+                if (FILE* f = fopen((base + "-skew.txt").c_str(), "w"))
+                {
+                    for (float k : audioDumpSkew) fprintf(f, "%.5f\n", k);
+                    fclose(f);
+                }
+                logf("audio dump written: %u samples, %u frames\n", (unsigned)(audioDump.size() / 2), (unsigned)audioDumpSkew.size());
+                std::vector<s16>().swap(audioDump);
+            }
         }
 
         auto now = clock::now();
@@ -1222,7 +1276,7 @@ int main(int argc, char** argv)
 #define P(c) 0ull
 enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, ProfGeom, ProfTimers };
 #endif
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.2f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15));
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.4f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f gprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp, P(8), P(9), P(10), P(11), P(12), P(13), P(14), P(15));
             if (autoClock && overclockMHz < 1785)
             {
                 lowFpsSeconds = frames < 57 ? lowFpsSeconds + 1 : 0;
