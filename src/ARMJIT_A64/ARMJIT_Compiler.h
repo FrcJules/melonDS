@@ -224,6 +224,7 @@ public:
 
     // 0 = switch mode, 1 = stay arm, 2 = stay thumb
     void* Gen_JumpTo9(int kind);
+    void* Gen_NextBlock(int num);
     void* Gen_JumpTo7(int kind);
 
     void Comp_BranchSpecialBehaviour(bool taken);
@@ -294,6 +295,10 @@ private:
 
     void* JumpToFuncs9[3];
     void* JumpToFuncs7[3];
+
+    // end of block: jumps straight into the next block when possible (see Gen_NextBlock), otherwise returns to the dispatcher
+    void* NextBlockFuncs[2];
+    u64 NextBlockBase = 0;
 
     // [Console Type][Num][Size][Sign Extend][Output register]
     void* PatchedLoadFuncs[2][2][3][2][32];
