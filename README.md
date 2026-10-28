@@ -1,3 +1,7 @@
+> **melonDS Switch (unofficial fork)**: this repository is a Nintendo Switch port of melonDS, not the official project.
+> Switch build, controls and notes: [`src/frontend/switch-sdl/README.md`](src/frontend/switch-sdl/README.md).
+> The text below is the original melonDS README.
+
 <p align="center"><img src="https://raw.githubusercontent.com/melonDS-emu/melonDS/master/res/icon/melon_128x128.png"></p>
 <h2 align="center"><b>melonDS</b></h2>
 <p align="center">

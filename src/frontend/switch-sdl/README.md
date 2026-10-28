@@ -1,31 +1,73 @@
-# melonDS pour Nintendo Switch (frontend SDL2 minimal)
+# melonDS Switch (unofficial fork)
 
-Frontend homebrew pour le cœur melonDS 1.x : rendu logiciel, **JIT ARM64**, **fastmem**, FreeBIOS + démarrage direct (aucun BIOS, firmware ou ROM n'est fourni ni nécessaire).
-Testé sur Switch Atmosphère, firmware 20.2.0. **Lancer hbmenu en mode application** (R tenu en lançant un jeu) : le mode applet (Album) n'a pas assez de mémoire.
+Nintendo DS emulator for the Nintendo Switch (homebrew), based on the current melonDS core (1.x).
+**Unofficial**: not made or supported by the melonDS team. Please do not report its bugs to them.
+The official, older port is `melonDS-emu/melonDS-switch`.
 
-## Compilation
-Toolchain devkitPro (devkitA64, libnx, portlibs `SDL2`, `SDL2_ttf`, `freetype`, `harfbuzz`, `libpng`, `bz2`, `zlib`) :
+**AI disclosure**: the Switch frontend and the changes made for this port were written with an AI assistant (Claude),
+directed and tested on real hardware by FrcJules. The emulation core is melonDS (GPL-3.0), with one small fix (see below).
+
+## Features
+- ARM64 **JIT** + fastmem, OpenGL ES 3 renderer (Mesa) with **2x** internal resolution, or software renderer.
+- **No BIOS or firmware needed** (melonDS FreeBIOS + direct boot). No game, BIOS, firmware or key is included.
+- **CPU "Auto" mode**: 1224 MHz, raised to 1785 MHz within ~0.5 s when a game falls behind or after a state is loaded,
+  lowered back when there is headroom (measured CPU load).
+- **Touch screen without touching** (TV mode): the right stick moves a cursor on the bottom screen, hold the right stick
+  click (R3) to touch (drag and handwriting work). The left stick works as the D-pad.
+- **Per-game settings** (renderer, resolution, CPU) saved in `<rom>.ui`; 4th generation Pokémon start in software
+  rendering (avoids the dotted black lines of the GPU renderer); games that change the display mid-frame (e.g.
+  Professor Layton videos) switch to software rendering automatically.
+- **Save states** (4 slots + automatic slot on exit), LZ4-compressed (~2.5 MB), saved in the background, last state kept
+  in memory for instant reloads. Audio rate control without pitch wobble.
+
+Tested at 60 fps (default settings) on: Mario Kart DS, Pokémon White, New Super Mario Bros., Pokémon HeartGold,
+Pokémon Diamond, Professor Layton and the Curious Village, StarFox Command, Metroid Prime Hunters, plus homebrew.
+Firmware 20.2.0 / Atmosphère.
+
+## Install
+Copy `switch/melonDS-Switch/melonDS-Switch.nro` to `sdmc:/switch/melonDS-Switch/`.
+**Run hbmenu in application mode** (hold R while starting a game, also when choosing the user): the applet mode
+(album) does not have enough memory.
+Your games (`.nds` files you dumped yourself) can be anywhere; the file browser starts in `sdmc:/roms/nds` if it exists.
+Settings, saves and states are in `sdmc:/switch/melonDS-Switch/` (files of the older `melonds-fork` folder are moved
+there automatically).
+
+## Controls
+| | |
+|---|---|
+| D-pad / left stick, A B X Y, L R, + (Start), - (Select) | DS buttons |
+| Right stick + R3 held | touch the bottom screen |
+| ZL + ZR + PLUS | menu (layout, filter, fps, CPU, renderer, resolution, states, change game, quit) |
+| ZL + ZR held, then X / Y / left / right | save state / load state / slot 1-4 |
+| L + R + PLUS + MINUS | quit (the state is saved in slot 0 and reloaded next time) |
+
+## Files (`sdmc:/switch/melonDS-Switch/`)
+| File | |
+|---|---|
+| `config.txt` | optional: `rom=` `romdir=` `overclock=<MHz>\|auto` `gpu=0\|1` `gpuscale=1..3` `autosave=0\|1` `autoload=0\|1` ... (see the top of `main.cpp`) |
+| `ui.txt` | display settings and defaults chosen in the menu |
+| `<rom>.ui` | renderer / resolution / CPU for that game |
+| `<rom>.sav`, `<rom>.ss0..4` | game save, states |
+| `log.txt` | one line per second (fps, CPU clock, temperature...) |
+
+## Build
+devkitPro (devkitA64, libnx, portlibs `switch-sdl2`, `switch-sdl2_ttf`, `switch-freetype`, `switch-harfbuzz`,
+`switch-libpng`, `switch-bzip2`, `switch-zlib`, `switch-lz4`, `switch-mesa`):
 ```
-cmake -S . -B build-switch -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake -DBUILD_SWITCH_SDL=ON -DBUILD_QT_SDL=OFF -DENABLE_OGLRENDERER=OFF
+cmake -S . -B build-switch -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake -DBUILD_SWITCH_SDL=ON -DBUILD_QT_SDL=OFF \
+      -DENABLE_OGLRENDERER=ON -DENABLE_OGL_COMPUTE=OFF -DSWITCH_PROFILE=OFF \
+      "-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG -flto=1" "-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG -flto=1" \
+      -DCMAKE_EXE_LINKER_FLAGS_RELEASE=-flto=1 -DMELONDS_LTO_EXCLUDE_DMA=ON -DMELONDS_LTO_EXCLUDE_GL=ON
 cmake --build build-switch --target melonDS-switch
 ```
-Résultat : `src/frontend/switch-sdl/melonDS-switch.nro` à copier dans `sdmc:/switch/`.
+Result: `build-switch/src/frontend/switch-sdl/melonDS-switch.nro`.
 
-## Utilisation
-- Sans `rom=` dans la configuration, un **explorateur** s'ouvre (haut/bas, A choisir, B dossier parent, +/- quitter) ; le dernier choix est retenu (`lastrom.txt`).
-- **ZL+ZR+PLUS** : menu (disposition empilée / côte à côte, filtre pixels/lissé, fps à l'écran, emplacement d'état, sauver/charger, changer de ROM, quitter).
-- **ZL+ZR tenus, puis X = sauver l'état, Y = charger, gauche/droite = emplacement 1 à 4**. Sauvegarde automatique à la sortie et rechargement au lancement (emplacement 0).
-- Sortie : L+R+PLUS+MINUS. Écran tactile = écran du bas.
+## Core changes
+Besides the frontend: geometry and JIT speed-ups (output identical, checked with fixed-rate audio recordings), a
+GLES 3 path for the OpenGL renderer, and `NDSCart/CartRetailIR.cpp`: the IR cartridge returned an uninitialised value
+for IR commands that are not emulated (also fixed upstream in pending PR #2727).
 
-## Fichiers (`sdmc:/switch/melonds-fork/`)
-| Fichier | Rôle |
-|---|---|
-| `config.txt` | `rom=` `sav=` (pour cette ROM seulement) `romdir=` `jit=0\|1` `fastmem=0\|1` `threaded3d=0\|1` `overclock=<MHz>` `audiointerp=0..4` (défaut 3 : cubique) `autosave=0\|1` `autoload=0\|1` |
-| `<nom de la ROM>.sav` | sauvegarde du jeu (une ROM choisie dans l'explorateur a son propre `.sav` ici) |
-| `<nom de la ROM>.ss0..4` | états |
-| `ui.txt`, `lastrom.txt` | réglages d'affichage, dernière ROM |
-| `log.txt` | une ligne par seconde : image/s, ms/image, file audio, sous-alimentations, fautes mémoire, fréquence CPU/EMC/GPU, température |
-
-## Réserves
-Mesures et limites : `docs/STATUS.md` (section Switch) du dépôt de travail. Le son n'a été vérifié qu'objectivement (file audio), pas à l'oreille. Le texte du menu utilise la police système de la console (lue à l'exécution, non distribuée).
-Licence : GPL-3.0-or-later (comme melonDS). Bibliothèques liées statiquement : SDL2 / SDL2_ttf (zlib), FreeType (FTL ou GPLv2), HarfBuzz (MIT), libpng, bzip2, zlib : textes de licence **non relus** ici.
+## License
+GPL-3.0-or-later, like melonDS. melonDS © the melonDS team (Arisotura, RSDuck and contributors); icon based on the
+melonDS icon by limittox. Third-party libraries linked into the `.nro`: see `THIRD-PARTY-NOTICES.md`.
+The menu text uses the console's shared system font, read at run time (not distributed).

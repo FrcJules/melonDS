@@ -3,12 +3,14 @@ cmake_minimum_required(VERSION 3.16)
 find_package(Threads REQUIRED)
 find_package(SDL2 REQUIRED)
 
-set(SWITCH_APP_NAME "melonDS fork" CACHE STRING "Title shown in hbmenu")
+set(SWITCH_APP_NAME "melonDS Switch" CACHE STRING "Title shown in hbmenu")
+set(SWITCH_APP_VERSION "0.2.0" CACHE STRING "Version shown in hbmenu and in the menu")
 
 add_executable(melonDS-switch
     main.cpp
     Platform.cpp
 )
+target_compile_definitions(melonDS-switch PRIVATE SWITCH_APP_VERSION="${SWITCH_APP_VERSION}")
 
 # timing profilers (prof=/glprof= columns of the log); they read the system counter in the hot loops
 option(SWITCH_PROFILE "Build the emulation-loop and GL profilers (MELONDS_PROF, MELONDS_GL_PROFILE)" ON)
@@ -41,7 +43,7 @@ find_program(NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin)
 find_program(ELF2NRO elf2nro HINTS $ENV{DEVKITPRO}/tools/bin)
 if (NACPTOOL AND ELF2NRO)
     add_custom_command(TARGET melonDS-switch POST_BUILD
-        COMMAND ${NACPTOOL} --create "${SWITCH_APP_NAME}" "FrcJules" "0.1" melonDS-switch.nacp
-        COMMAND ${ELF2NRO} $<TARGET_FILE:melonDS-switch> melonDS-switch.nro --nacp=melonDS-switch.nacp
+        COMMAND ${NACPTOOL} --create "${SWITCH_APP_NAME}" "FrcJules" "${SWITCH_APP_VERSION}" melonDS-switch.nacp
+        COMMAND ${ELF2NRO} $<TARGET_FILE:melonDS-switch> melonDS-switch.nro --nacp=melonDS-switch.nacp --icon=${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg
         COMMENT "Creating melonDS-switch.nro")
 endif()

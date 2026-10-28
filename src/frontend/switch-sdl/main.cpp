@@ -17,13 +17,13 @@
 */
 
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
-// Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
+// Config: sdmc:/switch/melonDS-Switch/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off, auto>   gpuclock=<MHz, 0 = system default>
 //   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 128; melonDS uses 64)   audioctl=0|1   audioskew=<ratio>   audiodump=<seconds>   sampler=<seconds> (sampling profiler, samples.bin)
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
-// Every second a line "t fps avg_ms max_ms" is appended to sdmc:/switch/melonds-fork/log.txt.
+// Every second a line "t fps avg_ms max_ms" is appended to sdmc:/switch/melonDS-Switch/log.txt.
 // Touch without the touch screen (docked): the right stick moves a cursor over the bottom screen, hold the right stick click to touch.
 // The left stick works as the D-pad.
 // Quit: hold L + R + PLUS + MINUS.
@@ -82,7 +82,11 @@ static std::atomic<int> DebugFrames {0};
 static void MemLog(const char* label);
 #define memlog(label) MemLog(label)
 
-static const char* ConfigDir = "sdmc:/switch/melonds-fork";
+static const char* ConfigDir = "sdmc:/switch/melonDS-Switch";
+static const char* OldConfigDir = "sdmc:/switch/melonds-fork";   // before version 0.2: its files are moved at start
+#ifndef SWITCH_APP_VERSION
+#define SWITCH_APP_VERSION "dev"
+#endif
 
 static bool ReadFile(const std::string& path, std::unique_ptr<u8[]>& data, u32& len)
 {
@@ -191,7 +195,7 @@ static void SamplerThread(void* arg)
         if (R_FAILED(rc)) { st->Failures++; continue; }
         st->Samples.insert(st->Samples.end(), rec, rec + 10);
     }
-    if (FILE* f = fopen("sdmc:/switch/melonds-fork/samples.bin", "wb"))
+    if (FILE* f = fopen("sdmc:/switch/melonDS-Switch/samples.bin", "wb"))
     {
         fwrite("SMP3", 1, 4, f);
         fwrite(st->Samples.data(), sizeof(u64), st->Samples.size(), f);
@@ -660,6 +664,20 @@ static void MemLog(const char* label)
 int main(int argc, char** argv)
 {
     mkdir(ConfigDir, 0777);
+    // settings, saves and states of the versions before 0.2 (sdmc:/switch/melonds-fork): moved here, existing files kept
+    int movedFiles = 0;
+    if (DIR* d = opendir(OldConfigDir))
+    {
+        while (dirent* e = readdir(d))
+        {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strcmp(e->d_name, "melonds-fork.nro")) continue;
+            std::string from = std::string(OldConfigDir) + "/" + e->d_name, to = std::string(ConfigDir) + "/" + e->d_name;
+            struct stat st;
+            if (stat(to.c_str(), &st) != 0 && rename(from.c_str(), to.c_str()) == 0) movedFiles++;
+        }
+        closedir(d);
+        rmdir(OldConfigDir);   // only if empty
+    }
     SwitchLogPath = std::string(ConfigDir) + "/log.txt";
     melonDS::SwitchCrashLogPath = SwitchLogPath.c_str();
     // the file is closed after every line: FAT only records its size on close, and the log must be readable while the app runs
@@ -685,7 +703,8 @@ int main(int argc, char** argv)
     // defaults (best measured setup); config.txt overrides, then ui.txt (menu), then the defaults below
     auto ui0 = ReadConfig("ui.txt");
     const bool useJit = !cfg.count("jit") || cfg["jit"] != "0";
-    logf("=== melonDS fork (Switch) start, jit=%d ===\n", useJit ? 1 : 0);
+    logf("=== melonDS Switch %s start, jit=%d ===\n", SWITCH_APP_VERSION, useJit ? 1 : 0);
+    if (movedFiles) logf("moved %d files from %s\n", movedFiles, OldConfigDir);
 
     // optional CPU overclock (off by default), restored on exit
     ClkrstSession cpuSession {};
@@ -807,7 +826,11 @@ int main(int argc, char** argv)
             size_t sl = romPath.find_last_of('/');
             if (sl != std::string::npos) startDir = romPath.substr(0, sl);
         }
-        if (startDir.empty()) startDir = "sdmc:/";
+        if (startDir.empty())
+        {
+            struct stat st;
+            startDir = stat("sdmc:/roms/nds", &st) == 0 ? "sdmc:/roms/nds" : "sdmc:/";
+        }
         romPath = BrowseRom(renderer, startDir);
         if (romPath.empty())
         {
@@ -1161,7 +1184,7 @@ int main(int argc, char** argv)
             SDL_Rect full {0, 0, 1280, 720};
             GfxFill(renderer, &full);
             GfxBlendMode(renderer, false);
-            DrawText(renderer, "Menu", 420, 40, Accent);
+            DrawText(renderer, "Menu  -  melonDS Switch " SWITCH_APP_VERSION, 420, 40, Accent);
             for (int i = 0; i < count; i++)
             {
                 std::string label = names[i];
