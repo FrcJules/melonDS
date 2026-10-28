@@ -912,6 +912,38 @@ int ClipPolygon(GPU3D& gpu, Vertex* vertices, int nverts, int clipstart)
     // some vertices that should get Y=-0x1000 get Y=0x1000 for some reason on hardware. it doesn't make sense.
     // clipping seems to process the Y plane before the X plane.
 
+    // fast path: when every vertex lies inside the view volume nothing gets clipped, and the three
+    // passes below would only copy the vertices around and apply the color fixup. Do just the fixup
+    // (same result, bit for bit). The first clipstart vertices are only ever used as neighbours.
+    {
+        bool inside = true;
+        for (int i = clipstart; i < nverts; i++)
+        {
+            const Vertex* vtx = &vertices[i];
+            s32 w = vtx->Position[3];
+            if (vtx->Position[0] > w || vtx->Position[1] > w || vtx->Position[2] > w ||
+                vtx->Position[0] < -w || vtx->Position[1] < -w || vtx->Position[2] < -w)
+            {
+                inside = false;
+                break;
+            }
+        }
+
+        if (inside)
+        {
+            for (int i = 0; i < nverts; i++)
+            {
+                Vertex* vtx = &vertices[i];
+
+                vtx->Color[0] &= ~0xFFF; vtx->Color[0] += 0xFFF;
+                vtx->Color[1] &= ~0xFFF; vtx->Color[1] += 0xFFF;
+                vtx->Color[2] &= ~0xFFF; vtx->Color[2] += 0xFFF;
+            }
+
+            return nverts;
+        }
+    }
+
     // Z clipping
     nverts = ClipAgainstPlane<2, attribs>(gpu, vertices, nverts, clipstart);
 
@@ -1101,6 +1133,23 @@ void GPU3D::SubmitPolygon() noexcept
         {
             posX = 0;
             posY = 0;
+        }
+        else if (w <= 0xFFFF && vtx->Position[0] >= -(s32)w && vtx->Position[0] <= (s32)w &&
+                 vtx->Position[1] >= -(s32)w && vtx->Position[1] <= (s32)w)
+        {
+            // common case (vertex inside the view volume, no divider precision loss):
+            // the hi-res division gives the low-res result too, since floor(16*q)>>4 == floor(q)
+            u32 ax = vtx->Position[0] + w;
+            u32 ay = -vtx->Position[1] + w;
+            u32 den = w << 1;
+            u32 hx = ((ax * Viewport[4]) << 4) / den;
+            u32 hy = ((ay * Viewport[5]) << 4) / den;
+
+            vtx->FinalPosition[0] = ((hx >> 4) + Viewport[0]) & 0x1FF;
+            vtx->FinalPosition[1] = ((hy >> 4) + Viewport[3]) & 0xFF;
+            vtx->HiresPosition[0] = (hx + (Viewport[0] << 4)) & 0x1FFF;
+            vtx->HiresPosition[1] = (hy + (Viewport[3] << 4)) & 0xFFF;
+            continue;
         }
         else
         {
