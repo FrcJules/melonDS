@@ -80,7 +80,10 @@ if (ENABLE_LTO)
 endif()
 
 if (NOT APPLE)
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -s")
+    option(MELONDS_KEEP_SYMBOLS "Keep the symbol table in release executables (to decode crash reports)" OFF)
+    if (NOT MELONDS_KEEP_SYMBOLS)
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -s")
+    endif()
 endif()
 
 if (WIN32)

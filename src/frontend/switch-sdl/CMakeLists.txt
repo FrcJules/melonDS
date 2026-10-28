@@ -16,6 +16,9 @@ if (ENABLE_OGLRENDERER)
     target_include_directories(core PUBLIC $ENV{DEVKITPRO}/portlibs/switch/include)
 endif()
 
+# optional timing of the emulation loop (src/Prof.h), read by main.cpp
+target_compile_definitions(core PUBLIC MELONDS_PROF)
+
 target_include_directories(melonDS-switch PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(melonDS-switch PRIVATE core Threads::Threads SDL2_ttf freetype harfbuzz png16 bz2 z ${SDL2_LIBRARIES} EGL GLESv2 glapi drm_nouveau nx)
 

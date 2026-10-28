@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include "Prof.h"
 #include "ARMJIT.h"
 #include "ARMJIT_Memory.h"
 #include <string.h>
@@ -531,6 +532,7 @@ void ARMJIT::SetFastMemory(bool enabled) noexcept
 
 void ARMJIT::CompileBlock(ARM* cpu) noexcept
 {
+    PROF_BEGIN();
     bool thumb = cpu->CPSR & 0x20;
 
     u32 blockAddr = cpu->R[15] - (thumb ? 2 : 4);
@@ -932,6 +934,7 @@ void ARMJIT::CompileBlock(ARM* cpu) noexcept
     u64* entry = &FastBlockLookupRegions[(localAddr >> 27)][(localAddr & 0x7FFFFFF) / 2];
     *entry = ((u64)blockAddr | cpu->Num) << 32;
     *entry |= JITCompiler.SubEntryOffset(block->EntryPoint);
+    PROF_END(ProfCompile);
 }
 
 void ARMJIT::InvalidateByAddr(u32 localAddr) noexcept

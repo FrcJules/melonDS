@@ -56,6 +56,7 @@
 #endif
 #include "GPU_Soft.h"
 #include "Platform.h"
+#include "Prof.h"
 #include "Savestate.h"
 
 using namespace melonDS;
@@ -130,7 +131,7 @@ static u32 DSKeyForButton(int button)
 
 
 
-unsigned long long MelonGLProf[8];   // see PlatformOGL.h
+unsigned long long MelonGLProf[16];   // see PlatformOGL.h
 
 // glColorMaskiOES (per-attachment colour masks, used by the GPU renderer) is an extension: resolved through EGL
 extern "C" void glColorMaskiOES(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
@@ -1202,7 +1203,14 @@ int main(int argc, char** argv)
             if (gpuOk) clkrstGetClockRate(&gpuSession, &gpuClock);
             float temp = 0;
             if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.2f glprof=%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
+            // emulation-loop timing, microseconds per frame (virtual counter ticks at 19.2 MHz)
+#if defined(MELONDS_PROF) && defined(__aarch64__)
+#define P(c) ((unsigned long long)(MelonProf[c] / 19.2 / std::max(frames, 1)))
+#else
+#define P(c) 0ull
+enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, ProfGeom, ProfTimers };
+#endif
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.2f glprof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu prof=%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), MelonGLProf[4] / 1000 / std::max(frames, 1), MelonGLProf[5] / 1000 / std::max(frames, 1), MelonGLProf[6] / 1000 / std::max(frames, 1), MelonGLProf[8] / 1000 / std::max(frames, 1), MelonGLProf[9] / 1000 / std::max(frames, 1), MelonGLProf[10] / 1000 / std::max(frames, 1), MelonGLProf[11] / 1000 / std::max(frames, 1), MelonGLProf[12] / std::max(frames, 1), MelonGLProf[13] / std::max(frames, 1), MelonGLProf[14] / 1000 / std::max(frames, 1), MelonGLProf[15] / 1000 / std::max(frames, 1), P(ProfARM9), P(ProfARM7), P(ProfEvtLCD), P(ProfEvtSPU), P(ProfEvtOther), P(ProfCompile), P(ProfGeom), P(ProfTimers), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
             if (autoClock && overclockMHz < 1785)
             {
                 lowFpsSeconds = frames < 57 ? lowFpsSeconds + 1 : 0;
@@ -1214,6 +1222,7 @@ int main(int argc, char** argv)
                 }
             }
             memset(MelonGLProf, 0, sizeof(MelonGLProf));
+            memset(MelonProf, 0, sizeof(MelonProf));
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
