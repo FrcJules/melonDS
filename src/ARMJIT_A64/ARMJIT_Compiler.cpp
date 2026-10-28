@@ -30,6 +30,7 @@ using namespace Arm64Gen;
 
 extern "C" void ARM_Ret();
 
+
 namespace melonDS
 {
 
@@ -288,6 +289,9 @@ Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
         JumpToFuncs7[i] = Gen_JumpTo7(i);
     }
 
+    for (int i = 0; i < 2; i++)
+        NextBlockFuncs[i] = Gen_NextBlock(i);
+
     /*
         W4 - whether the register was written to
         W5 - mode
@@ -475,6 +479,7 @@ Compiler::Compiler(melonDS::NDS& nds) : Arm64Gen::ARM64XEmitter(), NDS(nds)
     JitMemMainSize -= JitMemSecondarySize;
 
     SetCodeBase((u8*)GetRWPtr(), (u8*)GetRXPtr());
+    NextBlockBase = (u64)GetRXBase();
 }
 
 #ifdef __SWITCH__
@@ -723,7 +728,7 @@ void Compiler::Comp_BranchSpecialBehaviour(bool taken)
 
         if (ConstantCycles)
             ADD(RCycles, RCycles, ConstantCycles);
-        QuickTailCall(X0, ARM_Ret);
+        QuickTailCall(X0, NextBlockFuncs[Num]);
     }
 }
 
@@ -875,12 +880,91 @@ JitBlockEntry Compiler::CompileBlock(ARM* cpu, bool thumb, FetchedInstr instrs[]
 
     if (ConstantCycles)
         ADD(RCycles, RCycles, ConstantCycles);
-    QuickTailCall(X0, ARM_Ret);
+    QuickTailCall(X0, NextBlockFuncs[Num]);
 
     FlushIcache();
 
     return res;
 }
+
+// Block chaining. This is what the end of every block jumps to. It does what the dispatcher loop in
+// ARMv5/ARMv4::Execute would do between two blocks (the checks, the timestamp update and the lookup of the
+// next block), but without leaving the JIT code. Whenever anything is out of the ordinary (a stop request,
+// the time slice used up, no compiled block for the target) nothing is touched and it falls back to ARM_Ret.
+void* Compiler::Gen_NextBlock(int num)
+{
+    AlignCode16();
+    void* res = GetRXPtr();
+
+    assert(&NDS.ARM9Target == &NDS.ARM9Timestamp + 1);
+    assert(&NDS.ARM7Target == &NDS.ARM7Timestamp + 1);
+    static_assert(offsetof(ARM, FastBlockLookupSize) == offsetof(ARM, FastBlockLookupStart) + 4, "");
+
+    // Halted / IdleLoop always end the run. A pending IRQ only does when it can actually be taken
+    // (the I flag of the CPSR is clear), otherwise ARM::TriggerIRQ would do nothing and the loop go on
+    LDR(INDEX_UNSIGNED, W0, RCPU, offsetof(ARM, StopExecution));
+    FixupBranch nothingPending = CBZ(W0);
+    TSTI2R(W0, 0x00FF00FF);
+    FixupBranch stop = B(CC_NEQ);
+    FixupBranch irqMasked = TBNZ(RCPSR, 7);
+    FixupBranch stopIrq = B();
+    SetJumpTarget(nothingPending);
+    SetJumpTarget(irqMasked);
+
+    // the block's cycles are added to the timestamp; stop if the time slice is over
+    MOVP2R(X1, num ? &NDS.ARM7Timestamp : &NDS.ARM9Timestamp);
+    LDP(INDEX_SIGNED, X2, X3, X1, 0);
+    SXTW(X4, RCycles);
+    ADD(X2, X2, X4);
+    CMP(X2, X3);
+    FixupBranch timeUp = B(CC_HS);
+
+    // address of the next instruction: R15 - (thumb ? 2 : 4)
+    LDR(INDEX_UNSIGNED, W5, RCPU, offsetof(ARM, R[15]));
+    SUB(W5, W5, 4);
+    UBFX(W6, RCPSR, 5, 1);
+    ADD(W5, W5, W6, ArithOption(W6, ST_LSL, 1));
+
+    // must lie in the region the lookup table currently covers
+    LDP(INDEX_SIGNED, W6, W7, RCPU, offsetof(ARM, FastBlockLookupStart));
+    SUB(W6, W5, W6);
+    CMP(W6, W7);
+    FixupBranch outOfRegion = B(CC_HS);
+
+    // entry = FastBlockLookup[(addr - start) / 2], 8 bytes each: (addr | num) << 32 | code offset
+    LDR(INDEX_UNSIGNED, X7, RCPU, offsetof(ARM, FastBlockLookup));
+    ADD(X7, X7, X6, ArithOption(X6, ST_LSL, 2));
+    LDR(INDEX_UNSIGNED, X8, X7, 0);
+    LSR(X9, X8, 32);
+    if (num)
+        ORRI2R(W10, W5, 1);
+    else
+        MOV(W10, W5);
+    CMP(W9, W10);
+    FixupBranch noBlock = B(CC_NEQ);
+
+    MOVP2R(X11, &NextBlockBase);
+    LDR(INDEX_UNSIGNED, X11, X11, 0);
+    MOV(W8, W8);
+    ADD(X8, X8, X11);
+
+    // commit what the dispatcher would have done after the block, then run the next one
+    STR(INDEX_UNSIGNED, X2, X1, 0);
+    STR(INDEX_UNSIGNED, WZR, RCPU, offsetof(ARM, Cycles));
+    MOVI2R(RCycles, 0);
+    STR(INDEX_UNSIGNED, RCPSR, RCPU, offsetof(ARM, CPSR));
+    BR(X8);
+
+    SetJumpTarget(stop);
+    SetJumpTarget(stopIrq);
+    SetJumpTarget(timeUp);
+    SetJumpTarget(outOfRegion);
+    SetJumpTarget(noBlock);
+    QuickTailCall(X0, ARM_Ret);
+
+    return res;
+}
+
 
 void Compiler::Reset()
 {
