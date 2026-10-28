@@ -140,7 +140,7 @@ unsigned long long MelonGLProf[16];   // see PlatformOGL.h
 // sampling profiler (config sampler=<seconds>): a thread on core 2 (unused otherwise) pauses the emulation thread about
 // every 500 us, reads its PC, LR and up to 6 return addresses from the frame-pointer chain (only inside the thread's
 // stack mapping), and resumes it; after a 5 s delay and <seconds> of sampling, the records are written to samples.bin
-// ("SMP2", then 8 x u64 per sample). Off by default.
+// ("SMP3", then 10 x u64 per sample: PC, LR, 6 return addresses, x0, x1). Off by default.
 struct SamplerState
 {
     Handle Target = INVALID_HANDLE;
@@ -161,7 +161,7 @@ static void SamplerThread(void* arg)
         if (R_FAILED(svcSetThreadActivity(st->Target, ThreadActivity_Paused))) { st->Failures++; continue; }
         ThreadContext ctx;
         Result rc = svcGetThreadContext3(&ctx, st->Target);
-        u64 rec[8] {};
+        u64 rec[10] {};
         if (R_SUCCEEDED(rc))
         {
             if (!stackHi)
@@ -171,6 +171,8 @@ static void SamplerThread(void* arg)
             }
             rec[0] = ctx.pc.x;
             rec[1] = ctx.lr;
+            rec[8] = ctx.cpu_gprs[0].x;
+            rec[9] = ctx.cpu_gprs[1].x;
             u64 fp = ctx.fp;
             for (int i = 2; i < 8; i++)
             {
@@ -183,11 +185,11 @@ static void SamplerThread(void* arg)
         }
         svcSetThreadActivity(st->Target, ThreadActivity_Runnable);
         if (R_FAILED(rc)) { st->Failures++; continue; }
-        st->Samples.insert(st->Samples.end(), rec, rec + 8);
+        st->Samples.insert(st->Samples.end(), rec, rec + 10);
     }
     if (FILE* f = fopen("sdmc:/switch/melonds-fork/samples.bin", "wb"))
     {
-        fwrite("SMP2", 1, 4, f);
+        fwrite("SMP3", 1, 4, f);
         fwrite(st->Samples.data(), sizeof(u64), st->Samples.size(), f);
         fclose(f);
     }
@@ -941,7 +943,7 @@ int main(int argc, char** argv)
     {
         sampler.Target = threadGetCurHandle();
         sampler.Seconds = std::clamp(atoi(cfg["sampler"].c_str()), 1, 120);
-        sampler.Samples.reserve((size_t)sampler.Seconds * 2000 * 8);
+        sampler.Samples.reserve((size_t)sampler.Seconds * 2000 * 10);
         samplerOn = R_SUCCEEDED(threadCreate(&samplerThread, SamplerThread, &sampler, nullptr, 0x10000, 0x2B, 2)) && R_SUCCEEDED(threadStart(&samplerThread));
         logf("sampler: %s, %d s after a 5 s delay\n", samplerOn ? "started" : "FAILED to start", sampler.Seconds);
     }
@@ -1421,7 +1423,7 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
             if (samplerOn && sampler.Done && !samplerLogged)
             {
                 samplerLogged = true;
-                logf("sampler: %u samples written, %llu failures\n", (unsigned)(sampler.Samples.size() / 8), (unsigned long long)sampler.Failures);
+                logf("sampler: %u samples written, %llu failures\n", (unsigned)(sampler.Samples.size() / 10), (unsigned long long)sampler.Failures);
             }
             memset(MelonGLProf, 0, sizeof(MelonGLProf));
 #if defined(MELONDS_PROF) && defined(__aarch64__)
