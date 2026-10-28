@@ -24,6 +24,8 @@
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
 // Every second a line "t fps avg_ms max_ms" is appended to sdmc:/switch/melonds-fork/log.txt.
+// Touch without the touch screen (docked): the right stick moves a cursor over the bottom screen, hold the right stick click to touch.
+// The left stick works as the D-pad.
 // Quit: hold L + R + PLUS + MINUS.
 
 #include <stdio.h>
@@ -129,6 +131,10 @@ static u32 DSKeyForButton(int button)
     case 13: return 1 << 6;  // up
     case 14: return 1 << 4;  // right
     case 15: return 1 << 7;  // down
+    case 16: return 1 << 5;  // left stick, used as the D-pad
+    case 17: return 1 << 6;
+    case 18: return 1 << 4;
+    case 19: return 1 << 7;
     }
     return 0;
 }
@@ -1193,6 +1199,12 @@ int main(int argc, char** argv)
     u32 keys = 0;
     bool running = true;
     bool touching = false;
+    // touch cursor (docked play, no touch screen): the right stick moves it over the bottom screen, holding the right
+    // stick click (R3) touches; it hides 3 s after the last use
+    float cursorX = 128, cursorY = 96;
+    int stickRX = 0, stickRY = 0;
+    int cursorShownFrames = 0;
+    bool cursorTouching = false;
     std::vector<s16> audioBuf(2048 * 2);
 
     using clock = std::chrono::steady_clock;
@@ -1279,6 +1291,8 @@ int main(int argc, char** argv)
                         pad = 0;
                         keys = 0;
                         autoFrameCount = 0;   // the menu and the states it saves/loads stall frames
+                        stickRX = stickRY = 0;   // the menu consumed the stick events
+                        if (cursorTouching) { cursorTouching = false; if (!touching) nds->ReleaseScreen(); }
                         if (choice == 1) relaunch = true;
                         if (choice != 0) running = false;
                     }
@@ -1288,13 +1302,27 @@ int main(int argc, char** argv)
                         feedback(230, 200, 40, slot);
                     }
                 }
-                else keys |= DSKeyForButton(b);
+                else
+                {
+                    keys |= DSKeyForButton(b);
+                    if (b == 5) cursorTouching = true;
+                }
             }
             else if (ev.type == SDL_JOYBUTTONUP)
             {
                 int b = ev.jbutton.button;
                 if (b < 32) pad &= ~(1u << b);
                 keys &= ~DSKeyForButton(b);
+                if (b == 5 && cursorTouching)
+                {
+                    cursorTouching = false;
+                    if (!touching) nds->ReleaseScreen();
+                }
+            }
+            else if (ev.type == SDL_JOYAXISMOTION)
+            {
+                if (ev.jaxis.axis == 2) stickRX = ev.jaxis.value;
+                else if (ev.jaxis.axis == 3) stickRY = ev.jaxis.value;
             }
             else if (ev.type == SDL_FINGERDOWN || ev.type == SDL_FINGERMOTION)
             {
@@ -1305,14 +1333,32 @@ int main(int argc, char** argv)
                 {
                     nds->TouchScreen(sx, sy);
                     touching = true;
+                    cursorShownFrames = 0;
                 }
             }
             else if (ev.type == SDL_FINGERUP && touching)
             {
-                nds->ReleaseScreen();
+                if (!cursorTouching) nds->ReleaseScreen();
                 touching = false;
             }
         }
+
+        // right stick: dead zone, then a speed that grows with the square of the deflection (up to 3.5 DS pixels per frame)
+        auto stickSpeed = [](int v) { float f = (std::abs(v) - 6000) / 26767.f; return f <= 0 ? 0.f : (v < 0 ? -3.5f : 3.5f) * f * f; };
+        float cdx = stickSpeed(stickRX), cdy = stickSpeed(stickRY);
+        if (cdx != 0 || cdy != 0)
+        {
+            cursorX = std::clamp(cursorX + cdx, 0.f, 255.f);
+            cursorY = std::clamp(cursorY + cdy, 0.f, 191.f);
+            cursorShownFrames = 180;
+        }
+        if (cursorTouching)
+        {
+            nds->TouchScreen((int)cursorX, (int)cursorY);
+            cursorShownFrames = 180;
+        }
+        else if (cursorShownFrames > 0)
+            cursorShownFrames--;
 
         const u32 quit = (1 << 8) | (1 << 9) | (1 << 3) | (1 << 2); // R L Start Select
         if ((keys & quit) == quit)
@@ -1359,6 +1405,17 @@ int main(int argc, char** argv)
                 SDL_Rect r {40 + i * 48, 40, fbSlot == 0 ? 16 : 36, 36};
                 GfxFill(renderer, &r);
             }
+        }
+        if (cursorShownFrames > 0)
+        {
+            // cross: black outline, white (red while touching)
+            int cx = botR.x + (int)cursorX * botR.w / 256 + botR.w / 512, cy = botR.y + (int)cursorY * botR.h / 192 + botR.h / 384;
+            SDL_Rect outline[2] {{cx - 12, cy - 3, 25, 7}, {cx - 3, cy - 12, 7, 25}};
+            SDL_Rect inner[2] {{cx - 10, cy - 1, 21, 3}, {cx - 1, cy - 10, 3, 21}};
+            GfxColor(renderer, 0, 0, 0, 255);
+            for (const SDL_Rect& r : outline) GfxFill(renderer, &r);
+            GfxColor(renderer, 255, cursorTouching ? 60 : 255, cursorTouching ? 60 : 255, 255);
+            for (const SDL_Rect& r : inner) GfxFill(renderer, &r);
         }
         GfxPresent(renderer);
 
