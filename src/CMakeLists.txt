@@ -256,3 +256,8 @@ endif()
 if (MELONDS_LTO_EXCLUDE_DMA)
     set_source_files_properties(DMA.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
 endif()
+
+# LTO made the OpenGL 2D renderer ~500x slower in one game (cause unknown): keep it out of LTO
+if (MELONDS_LTO_EXCLUDE_GL AND ENABLE_OGLRENDERER)
+    set_source_files_properties(GPU_OpenGL.cpp GPU2D_OpenGL.cpp GPU3D_OpenGL.cpp GPU3D_TexcacheOpenGL.cpp OpenGLSupport.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
+endif()
