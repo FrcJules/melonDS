@@ -18,7 +18,7 @@
 
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
-//   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
+//   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>   gpuclock=<MHz, 0 = system default>
 //   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 128; melonDS uses 64)   audioctl=0|1   audioskew=<ratio>   audiodump=<seconds>
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
@@ -652,6 +652,16 @@ int main(int argc, char** argv)
     ClkrstSession emcSession {}, gpuSession {};
     bool emcOk = clkOk && R_SUCCEEDED(clkrstOpenSession(&emcSession, PcvModuleId_EMC, 3));
     bool gpuOk = clkOk && R_SUCCEEDED(clkrstOpenSession(&gpuSession, PcvModuleId_GPU, 3));
+    // gpuclock=<MHz> (0 = system default), restored on exit
+    u32 oldGpuClock = 0;
+    if (gpuOk && cfg.count("gpuclock") && atoi(cfg["gpuclock"].c_str()) > 0)
+    {
+        clkrstGetClockRate(&gpuSession, &oldGpuClock);
+        Result rc = clkrstSetClockRate(&gpuSession, (u32)std::clamp(atoi(cfg["gpuclock"].c_str()), 76, 921) * 1000000u);
+        u32 applied = 0;
+        clkrstGetClockRate(&gpuSession, &applied);
+        logf("gpu clock %u -> %u MHz (rc=0x%x)\n", oldGpuClock / 1000000, applied / 1000000, rc);
+    }
 
     // temperature probe (board sensor), logged each second
     TsSession tsSession {};
@@ -1325,7 +1335,11 @@ enum { ProfARM9, ProfARM7, ProfEvtLCD, ProfEvtSPU, ProfEvtOther, ProfCompile, Pr
         clkrstCloseSession(&cpuSession);
     }
     if (emcOk) clkrstCloseSession(&emcSession);
-    if (gpuOk) clkrstCloseSession(&gpuSession);
+    if (gpuOk)
+    {
+        if (oldGpuClock) clkrstSetClockRate(&gpuSession, oldGpuClock);
+        clkrstCloseSession(&gpuSession);
+    }
     if (tsOk) tsSessionClose(&tsSession);
     tsExit();
     logf("exit step 7\n");
