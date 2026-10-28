@@ -131,10 +131,6 @@ static u32 DSKeyForButton(int button)
     case 13: return 1 << 6;  // up
     case 14: return 1 << 4;  // right
     case 15: return 1 << 7;  // down
-    case 16: return 1 << 5;  // left stick, used as the D-pad
-    case 17: return 1 << 6;
-    case 18: return 1 << 4;
-    case 19: return 1 << 7;
     }
     return 0;
 }
@@ -1203,6 +1199,12 @@ int main(int argc, char** argv)
     // stick click (R3) touches; it hides 3 s after the last use
     float cursorX = 128, cursorY = 96;
     int stickRX = 0, stickRY = 0;
+    u32 stickKeys = 0;   // D-pad keys from the left stick
+    // the sticks are read through libnx: SDL sent no axis event at all here (8 controllers opened, 4 axes each), and
+    // padInitializeAny merges the handheld mode and the controllers of players 1-8
+    PadState stickPad;
+    padConfigureInput(8, HidNpadStyleSet_NpadStandard);
+    padInitializeAny(&stickPad);
     int cursorShownFrames = 0;
     bool cursorTouching = false;
     std::vector<s16> audioBuf(2048 * 2);
@@ -1291,7 +1293,6 @@ int main(int argc, char** argv)
                         pad = 0;
                         keys = 0;
                         autoFrameCount = 0;   // the menu and the states it saves/loads stall frames
-                        stickRX = stickRY = 0;   // the menu consumed the stick events
                         if (cursorTouching) { cursorTouching = false; if (!touching) nds->ReleaseScreen(); }
                         if (choice == 1) relaunch = true;
                         if (choice != 0) running = false;
@@ -1319,11 +1320,6 @@ int main(int argc, char** argv)
                     if (!touching) nds->ReleaseScreen();
                 }
             }
-            else if (ev.type == SDL_JOYAXISMOTION)
-            {
-                if (ev.jaxis.axis == 2) stickRX = ev.jaxis.value;
-                else if (ev.jaxis.axis == 3) stickRY = ev.jaxis.value;
-            }
             else if (ev.type == SDL_FINGERDOWN || ev.type == SDL_FINGERMOTION)
             {
                 int px = (int)(ev.tfinger.x * 1280), py = (int)(ev.tfinger.y * 720);
@@ -1343,6 +1339,13 @@ int main(int argc, char** argv)
             }
         }
 
+        padUpdate(&stickPad);
+        {
+            HidAnalogStickState ls = padGetStickPos(&stickPad, 0), rs = padGetStickPos(&stickPad, 1);
+            stickRX = rs.x;
+            stickRY = -rs.y;   // libnx: up is positive
+            stickKeys = (ls.x < -16000 ? 1u << 5 : 0) | (ls.x > 16000 ? 1u << 4 : 0) | (ls.y > 16000 ? 1u << 6 : 0) | (ls.y < -16000 ? 1u << 7 : 0);
+        }
         // right stick: dead zone, then a speed that grows with the square of the deflection (up to 3.5 DS pixels per frame)
         auto stickSpeed = [](int v) { float f = (std::abs(v) - 6000) / 26767.f; return f <= 0 ? 0.f : (v < 0 ? -3.5f : 3.5f) * f * f; };
         float cdx = stickSpeed(stickRX), cdy = stickSpeed(stickRY);
@@ -1365,7 +1368,7 @@ int main(int argc, char** argv)
             break;
 
         DebugStage = 2;
-        nds->SetKeyMask(((pad & (1u << 8)) && (pad & (1u << 9))) ? 0xFFF : (~keys & 0xFFF));
+        nds->SetKeyMask(((pad & (1u << 8)) && (pad & (1u << 9))) ? 0xFFF : (~(keys | stickKeys) & 0xFFF));
 
         auto t0 = clock::now();
         nds->RunFrame();
