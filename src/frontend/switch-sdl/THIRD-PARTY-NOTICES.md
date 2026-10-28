@@ -7,6 +7,12 @@ binary releases (folder `licenses/` of the release archive).
 |---|---|---|
 | melonDS core, FreeBIOS | GPL-3.0-or-later | https://github.com/melonDS-emu/melonDS |
 | Teakra (DSi DSP) | MIT (`src/teakra/LICENSE`) | https://github.com/wwylele/teakra |
+| blip_buf (audio resampling) | LGPL-2.1 (`src/blip-buf/license.txt`) | in melonDS |
+| Dolphin code (`src/dolphin`) | GPL-2.0-or-later | in melonDS |
+| FatFs | FatFs license (BSD-1-like, `src/fatfs/LICENSE.txt`) | in melonDS |
+| xxHash | BSD-2-Clause | in melonDS |
+| sha1 (Steve Reid) | public domain | in melonDS |
+| tiny-AES-c | Unlicense (public domain) | in melonDS |
 | libnx | ISC | https://github.com/switchbrew/libnx |
 | SDL2 | zlib | https://github.com/devkitPro/SDL |
 | SDL2_ttf | zlib | https://github.com/libsdl-org/SDL_ttf |
