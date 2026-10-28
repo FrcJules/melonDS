@@ -19,7 +19,7 @@
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
-//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)
+//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
@@ -767,8 +767,15 @@ int main(int argc, char** argv)
     NDSArgs args;
     if (!useJit)
         args.JIT = std::nullopt;
-    else if (cfg.count("fastmem") && cfg["fastmem"] == "0")
-        args.JIT->FastMemory = false;
+    else
+    {
+        if (cfg.count("fastmem") && cfg["fastmem"] == "0")
+            args.JIT->FastMemory = false;
+        if (cfg.count("jitblock")) args.JIT->MaxBlockSize = (unsigned)std::clamp(atoi(cfg["jitblock"].c_str()), 1, 256);
+        if (cfg.count("jitliteral")) args.JIT->LiteralOptimizations = cfg["jitliteral"] != "0";
+        if (cfg.count("jitbranch")) args.JIT->BranchOptimizations = cfg["jitbranch"] != "0";
+        logf("jit: max block %u, literal opt %d, branch opt %d\n", args.JIT->MaxBlockSize, (int)args.JIT->LiteralOptimizations, (int)args.JIT->BranchOptimizations);
+    }
     args.OutputSampleRate = audioRate;
     args.Interpolation = static_cast<AudioInterpolation>(cfg.count("audiointerp") ? std::clamp(atoi(cfg["audiointerp"].c_str()), 0, 4) : 3);
     logf("audio interpolation: %d\n", (int)args.Interpolation);
