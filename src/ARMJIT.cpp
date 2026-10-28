@@ -151,6 +151,14 @@ void SlowWrite9(u32 addr, ARMv5* cpu, u32 val)
     {
         *(T*)&cpu->DTCM[addr & 0x3FFF] = val;
     }
+    else if (ConsoleType == 0 && std::is_same<T, u32>::value && (addr & 0xFFFFFFC0) == 0x04000400)
+    {
+        // geometry FIFO ports (DS mode, STR/STM of display lists): for these addresses the
+        // ARM9Write32 -> ARM9IOWrite32 -> GPU3D::Write32 chain only does this
+        GPU3D& gpu3d = NDS::Current->GPU.GPU3D;
+        if (gpu3d.GeometryEnabled)
+            gpu3d.WriteToGXFIFO(val);
+    }
     else if (std::is_same<T, u32>::value)
     {
         NDS::Current->ARM9Write32(addr, val);
