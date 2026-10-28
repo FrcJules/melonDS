@@ -199,6 +199,9 @@ bool GLRenderer2D::InitShaders(GLRenderer2D& other)
 
 bool GLRenderer2D::Init()
 {
+    PalShadowBGValid = false;
+    PalShadowOBJValid = false;
+
     // sprite prerender vertex data: 2x position, 1x sprite index
     int sprdatasize = (3 * 6) * 128;
     SpritePreVtxData = new u16[sprdatasize];
@@ -401,6 +404,9 @@ GLRenderer2D::~GLRenderer2D()
 
 void GLRenderer2D::Reset()
 {
+    PalShadowBGValid = false;
+    PalShadowOBJValid = false;
+
     memset(BGLayerFB, 0, sizeof(BGLayerFB));
     memset(BGLayerTex, 0, sizeof(BGLayerTex));
 
@@ -513,6 +519,26 @@ bool GLRenderer2D::IsScreenOn()
     return true;
 }
 
+
+void GLRenderer2D::UploadPalette(GLuint tex, const u16* cur, u16* shadow, bool& valid, int rows)
+{
+    // the callers rely on this texture being bound afterwards, even when nothing needs to be sent
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    int first = 0, last = rows - 1;
+    if (valid)
+    {
+        while (first <= last && !memcmp(&cur[first * 256], &shadow[first * 256], 256 * 2)) first++;
+        if (first > last) return;                 // identical to what the GPU already has
+        while (last > first && !memcmp(&cur[last * 256], &shadow[last * 256], 256 * 2)) last--;
+    }
+
+    int count = last - first + 1;
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, first, 256, count, GL_RGBA, MELONDS_RGB5A1_TYPE,
+                    MELONDS_PIX555(&cur[first * 256], 256 * count));
+    memcpy(&shadow[first * 256], &cur[first * 256], count * 256 * 2);
+    valid = true;
+}
 
 void GLRenderer2D::UpdateAndRender(int line)
 {
@@ -732,9 +758,7 @@ void GLRenderer2D::UpdateAndRender(int line)
             }
         }
 
-        glBindTexture(GL_TEXTURE_2D, PalTex_BG);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1+(4*16), GL_RGBA, MELONDS_RGB5A1_TYPE,
-                        MELONDS_PIX555(TempPalBuffer, 256*(1+(4*16))));
+        UploadPalette(PalTex_BG, TempPalBuffer, PalShadowBG, PalShadowBGValid, 1+(4*16));
     }
 
     GPU.PaletteDirty &= ~palmask;
@@ -787,8 +811,7 @@ void GLRenderer2D::UpdateAndRender(int line)
         }
 
         glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, PalTex_OBJ);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1+16, GL_RGBA, MELONDS_RGB5A1_TYPE, MELONDS_PIX555(TempPalBuffer, 256*(1+16)));
+        UploadPalette(PalTex_OBJ, TempPalBuffer, PalShadowOBJ, PalShadowOBJValid, 1+16);
 
         PrerenderSprites();
 

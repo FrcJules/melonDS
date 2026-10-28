@@ -208,6 +208,14 @@ private:
 
     u16 TempPalBuffer[256 * (1 + (4*16))];
 
+    // last palette data sent to the GPU: uploads are slow (the driver stalls on a texture still in use),
+    // so only the rows that really changed are sent, and nothing at all if nothing changed
+    u16 PalShadowBG[256 * (1 + (4*16))];
+    u16 PalShadowOBJ[256 * (1 + 16)];
+    bool PalShadowBGValid = false;
+    bool PalShadowOBJValid = false;
+    void UploadPalette(GLuint tex, const u16* cur, u16* shadow, bool& valid, int rows);
+
     bool IsScreenOn();
 
     void UpdateAndRender(int line);
