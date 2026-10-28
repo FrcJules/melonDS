@@ -13,6 +13,22 @@
 
 #include MELONDS_GL_HEADER
 
+#ifdef MELONDS_GL_PROFILE
+// optional per-region timing of the OpenGL renderer (nanoseconds, summed; read and reset by the frontend)
+#include <chrono>
+extern unsigned long long MelonGLProf[8];
+struct MelonGLProfScope
+{
+    int Index;
+    std::chrono::steady_clock::time_point Start;
+    explicit MelonGLProfScope(int index) : Index(index), Start(std::chrono::steady_clock::now()) {}
+    ~MelonGLProfScope() { MelonGLProf[Index] += (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - Start).count(); }
+};
+#define GL_PROF(index) MelonGLProfScope MelonGLProfVar##index(index)
+#else
+#define GL_PROF(index)
+#endif
+
 #ifdef MELONDS_GLES
 // OpenGL ES 3.0 / WebGL2 compatibility: the renderers are written for desktop OpenGL 3.1,
 // these definitions cover the (few) desktop-only calls they use.

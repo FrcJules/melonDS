@@ -12,7 +12,7 @@ add_executable(melonDS-switch
 
 if (ENABLE_OGLRENDERER)
     # GLES 3 renderer (Mesa/nouveau on the console): same definitions as the WebGL build
-    target_compile_definitions(core PUBLIC "MELONDS_GL_HEADER=<GLES3/gl3.h>" MELONDS_GLES)
+    target_compile_definitions(core PUBLIC "MELONDS_GL_HEADER=<GLES3/gl3.h>" MELONDS_GLES MELONDS_GL_PROFILE)
     target_include_directories(core PUBLIC $ENV{DEVKITPRO}/portlibs/switch/include)
 endif()
 

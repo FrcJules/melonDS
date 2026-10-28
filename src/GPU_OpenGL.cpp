@@ -405,6 +405,7 @@ void GLRenderer::SetScaleFactor(int scale)
 
 void GLRenderer::DrawScanline(u32 line)
 {
+    GL_PROF(3);
     u32 dispcnt_a_diff = DispCntA ^ GPU.GPU2D_A.DispCnt;
     u32 dispcnt_b_diff = DispCntB ^ GPU.GPU2D_B.DispCnt;
     u32 capturecnt_diff = CaptureCnt ^ GPU.CaptureCnt;
@@ -529,6 +530,7 @@ void GLRenderer::DrawSprites(u32 line)
 
 void GLRenderer::RenderScreen(int ystart, int yend)
 {
+    GL_PROF(1);
     int backbuf = BackBuffer;
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, FPOutputFB[backbuf]);
@@ -641,6 +643,7 @@ void GLRenderer::VBlankEnd()
 
 void GLRenderer::DoCapture(int ystart, int yend)
 {
+    GL_PROF(2);
     u32 dispcnt = DispCntA;
     u32 capcnt = CaptureCnt;
     u32 dispmode = (dispcnt >> 16) & 0x3;

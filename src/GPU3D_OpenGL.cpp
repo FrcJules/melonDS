@@ -1300,6 +1300,7 @@ void GLRenderer3D::RenderSceneChunk(int y, int h)
 
 void GLRenderer3D::RenderFrame()
 {
+    GL_PROF(0);
     u8 clrBitmapDirty;
     if (!Texcache.Update(clrBitmapDirty) && GPU3D.RenderFrameIdentical)
     {

@@ -19,7 +19,7 @@
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
-//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)
+//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
@@ -129,6 +129,8 @@ static u32 DSKeyForButton(int button)
 }
 
 
+
+unsigned long long MelonGLProf[8];   // see PlatformOGL.h
 
 // glColorMaskiOES (per-attachment colour masks, used by the GPU renderer) is an extension: resolved through EGL
 extern "C" void glColorMaskiOES(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
@@ -623,8 +625,8 @@ int main(int argc, char** argv)
     int overclockMHz = cfg.count("overclock") ? atoi(cfg["overclock"].c_str()) : (ui0.count("cpu") ? atoi(ui0["cpu"].c_str()) : 0);
     bool autoClock = overclockMHz == 0 && !cfg.count("overclock");
     if (autoClock) overclockMHz = 1224;
-    // 3D renderer: software (default) or the GLES 3 renderer on the console's GPU (config gpu=0|1, menu, ui.txt)
-    bool useGpu = cfg.count("gpu") ? cfg["gpu"] == "1" : (ui0.count("gpu") && ui0["gpu"] == "1");
+    // 3D renderer: the GLES 3 renderer (default, 2x) or software; software is also the fallback if the GL renderer fails. The GLES 3 renderer on the console's GPU (config gpu=0|1, menu, ui.txt)
+    bool useGpu = cfg.count("gpu") ? cfg["gpu"] == "1" : (ui0.count("gpu") ? ui0["gpu"] == "1" : true);
     int gpuScale = std::clamp(cfg.count("gpuscale") ? atoi(cfg["gpuscale"].c_str()) : (ui0.count("gpuscale") ? atoi(ui0["gpuscale"].c_str()) : 2), 1, 3);
     bool threaded3d = cfg.count("threaded3d") ? cfg["threaded3d"] == "1" : (ui0.count("threaded") ? ui0["threaded"] == "1" : true);
     if (R_SUCCEEDED(clkrstInitialize()))
@@ -889,11 +891,12 @@ int main(int argc, char** argv)
     const bool autosave = !cfg.count("autosave") || cfg["autosave"] != "0";
     if (!cfg.count("autoload") || cfg["autoload"] != "0")
     {
-        FILE* f = fopen(statePath(0).c_str(), "rb");
+        int loadSlot = cfg.count("loadslot") ? std::clamp(atoi(cfg["loadslot"].c_str()), 0, 4) : 0;   // slot loaded at start (0 = the automatic one)
+        FILE* f = fopen(statePath(loadSlot).c_str(), "rb");
         if (f)
         {
             fclose(f);
-            logf("autoload slot 0: %s\n", loadState(statePath(0)) ? "ok" : "FAILED");
+            logf("autoload slot %d: %s\n", loadSlot, loadState(statePath(loadSlot)) ? "ok" : "FAILED");
         }
     }
     int slot = 1;
@@ -1199,7 +1202,7 @@ int main(int argc, char** argv)
             if (gpuOk) clkrstGetClockRate(&gpuSession, &gpuClock);
             float temp = 0;
             if (tsOk) tsSessionGetTemperature(&tsSession, &temp);
-            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.2f faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
+            logf("%d %d %.1f %.1f jit_trans=%llu jit_trans_ms=%llu audio_ms=%u under=%llu drops=%llu skew=%.2f glprof=%llu/%llu/%llu/%llu faults=%llu clk=%u emc=%u gpu=%u temp=%.1f\n", seconds, frames, sumMs / frames, maxMs, (unsigned long long)SwitchJitTransitions, (unsigned long long)(SwitchJitTransitionNs / 1000000), audio ? (unsigned)(SDL_GetQueuedAudioSize(audio) / 4 * 1000 / audioRate) : 0u, (unsigned long long)audioUnderruns, (unsigned long long)audioDrops, audioSkew, MelonGLProf[0] / 1000 / std::max(frames, 1), MelonGLProf[1] / 1000 / std::max(frames, 1), MelonGLProf[2] / 1000 / std::max(frames, 1), MelonGLProf[3] / 1000 / std::max(frames, 1), (unsigned long long)SwitchFaultCount, curClock / 1000000, emcClock / 1000000, gpuClock / 1000000, temp);
             if (autoClock && overclockMHz < 1785)
             {
                 lowFpsSeconds = frames < 57 ? lowFpsSeconds + 1 : 0;
@@ -1210,6 +1213,7 @@ int main(int argc, char** argv)
                     logf("auto clock: %d fps for 3 s, CPU raised to 1785 MHz\n", frames);
                 }
             }
+            memset(MelonGLProf, 0, sizeof(MelonGLProf));
             frames = 0; sumMs = 0; maxMs = 0;
             secStart = now;
         }
