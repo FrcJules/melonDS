@@ -29,6 +29,7 @@
 // Quit: hold L + R + PLUS + MINUS.
 
 #include <stdio.h>
+#include <lz4.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -1007,11 +1008,20 @@ int main(int argc, char** argv)
     int cachedSlot = -1;
     std::shared_ptr<std::vector<u8>> cachedState;
     std::thread stateWriter;
+    // state files are compressed with LZ4: "MDSZ", u32 size of the state, LZ4 block (a 19.5 MB Mario Kart DS state is
+    // ~3 MB: less to write and read on the SD card). Files without this header (older states) are read as they are.
     auto writeStateFile = [](const std::string& path, const std::vector<u8>& data) -> bool {
+        std::vector<u8> out(8 + LZ4_compressBound((int)data.size()));
+        memcpy(out.data(), "MDSZ", 4);
+        u32 rawSize = (u32)data.size();
+        memcpy(out.data() + 4, &rawSize, 4);
+        int n = LZ4_compress_default((const char*)data.data(), (char*)out.data() + 8, (int)data.size(), (int)out.size() - 8);
+        if (n <= 0) return false;
+        out.resize(8 + n);
         std::string tmp = path + ".tmp";
         FILE* f = fopen(tmp.c_str(), "wb");
         if (!f) return false;
-        bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+        bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
         ok = (fclose(f) == 0) && ok;
         if (!ok) { remove(tmp.c_str()); return false; }
         remove(path.c_str());
@@ -1039,7 +1049,16 @@ int main(int argc, char** argv)
             std::unique_ptr<u8[]> buf;
             u32 len = 0;
             if (!ReadFile(statePath(s), buf, len) || len < 16) return false;
-            data = std::make_shared<std::vector<u8>>(buf.get(), buf.get() + len);
+            if (!memcmp(buf.get(), "MDSZ", 4))
+            {
+                u32 rawSize;
+                memcpy(&rawSize, buf.get() + 4, 4);
+                data = std::make_shared<std::vector<u8>>(rawSize);
+                if (LZ4_decompress_safe((const char*)buf.get() + 8, (char*)data->data(), (int)(len - 8), (int)rawSize) != (int)rawSize)
+                    return false;
+            }
+            else
+                data = std::make_shared<std::vector<u8>>(buf.get(), buf.get() + len);
         }
         // keep the running state so that a bad file does not leave the emulator half-loaded
         Savestate backup;
