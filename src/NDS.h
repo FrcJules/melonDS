@@ -261,6 +261,8 @@ public: // TODO: Encapsulate the rest of these members
 
     int ConsoleType;
     int CurCPU;
+    // longest stretch (in ARM7 cycles) the CPUs run before the main loop re-evaluates events; events still fire at their exact time
+    s32 MaxIterationCycles = 64;
 
     SchedEvent SchedList[Event_MAX] {};
     u8 ARM9MemTimings[0x40000][8];

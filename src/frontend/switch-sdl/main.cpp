@@ -19,7 +19,7 @@
 // Minimal Nintendo Switch frontend (SDL2, software renderer, FreeBIOS direct boot).
 // Config: sdmc:/switch/melonds-fork/config.txt (also threaded3d=0|1), one "key=value" per line:
 //   rom=<path of the .nds>   sav=<path of the save file>   jit=0|1   overclock=<MHz, 0 = off>
-//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1
+//   audiointerp=0..4 (none, linear, cosine, cubic, gaussian; default 3)   autosave=0|1   autoload=1|0 (default on)   loadslot=0..4 (state loaded at start)   jitblock=1..256 (default 32) jitliteral=0|1 jitbranch=0|1   itercycles=16..512 (main-loop step, default 64; larger = faster but coarser ARM9/ARM7 interleaving)
 // Save states (next to the config, named after the ROM: <rom>.ss<slot>, slot 0 = automatic):
 //   hold ZL + ZR, then X = save, Y = load, left/right = choose slot 1..4 (squares on the left show the slot, colour = result).
 //   The state is also saved automatically on exit (slot 0) and loaded at start.
@@ -781,6 +781,11 @@ int main(int argc, char** argv)
     logf("audio interpolation: %d\n", (int)args.Interpolation);
     DebugStage = 10;
     auto nds = std::make_unique<NDS>(std::move(args), nullptr);
+    if (cfg.count("itercycles"))
+    {
+        nds->MaxIterationCycles = std::clamp(atoi(cfg["itercycles"].c_str()), 16, 512);
+        logf("main loop iteration: %d cycles (default 64)\n", (int)nds->MaxIterationCycles);
+    }
     logf("addrs: main=%llx win9=%llx win7=%llx codemem=%llx\n", (unsigned long long)(u64)&main, (unsigned long long)SwitchDbgWin9, (unsigned long long)SwitchDbgWin7, (unsigned long long)SwitchDbgCodeMem);
     memlog("after NDS");
 
