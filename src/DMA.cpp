@@ -579,6 +579,30 @@ void DMA::Run9()
             if (NDS.ARM9Timestamp >= NDS.ARM9Target) break;
         }
     }
+    else if (IsGXFIFODMA && CurDstAddr == 0x04000400 && DstAddrInc == 0 && NDS.ConsoleType == 0)
+    {
+        // geometry FIFO DMA (main RAM -> 0x04000400, DS mode): same reads, writes and timings as the generic loop below,
+        // without the ARM9Read32/ARM9Write32 -> ARM9IOWrite32 -> GPU3D::Write32 dispatch for every word
+        // (for this address that chain only does: if (GeometryEnabled) WriteToGXFIFO(val))
+        GPU3D& gpu3d = NDS.GPU.GPU3D;
+        while (IterCount > 0 && !Stall)
+        {
+            NDS.ARM9Timestamp += (UnitTimings9_32(burststart) << NDS.ARM9ClockShift);
+            burststart = false;
+
+            u32 val = ((CurSrcAddr >> 24) == 0x02) ? *(u32*)&NDS.MainRAM[(CurSrcAddr & ~0x3) & NDS.MainRAMMask]
+                                                   : NDS.ARM9Read32(CurSrcAddr);
+            if (gpu3d.GeometryEnabled)
+                gpu3d.WriteToGXFIFO(val);
+
+            CurSrcAddr += SrcAddrInc<<2;
+            CurDstAddr += DstAddrInc<<2;
+            IterCount--;
+            RemCount--;
+
+            if (NDS.ARM9Timestamp >= NDS.ARM9Target) break;
+        }
+    }
     else
     {
         while (IterCount > 0 && !Stall)

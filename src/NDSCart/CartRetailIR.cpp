@@ -85,7 +85,10 @@ u8 CartRetailIR::SPITransmitReceive(u8 val)
 
     // TODO: emulate actual IR comm
 
-    u8 ret;
+    // the other commands (0x01 receive, 0x02 send...) answer 0, i.e. nothing received, as with no IR partner. ret used
+    // to be left uninitialised for them: Pokemon HeartGold polls the IR chip and got whatever was on the stack, so its
+    // behaviour (and sound) changed with unrelated code changes in the frontend
+    u8 ret = 0;
     switch (IRCmd)
     {
     case 0x00: // pass-through

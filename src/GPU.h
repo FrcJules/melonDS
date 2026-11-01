@@ -637,8 +637,8 @@ public:
     u8 DispFIFOWritePtr;
     alignas(8) u16 DispFIFOBuffer[256];
 
-    u32 CaptureCnt;
-    bool CaptureEnable;
+    u32 CaptureCnt = 0;
+    bool CaptureEnable = false;
 
     alignas(u64) u8 Palette[2*1024] {};
     alignas(u64) u8 OAM[2*1024] {};
@@ -811,7 +811,7 @@ private:
 
     std::unique_ptr<Renderer> Rend = nullptr;
 
-    u16 VRAMCaptureBlockFlags[16];
+    u16 VRAMCaptureBlockFlags[16] {};   // read by SetRenderer() in the constructor, before Reset()
 
     u16* VRAMCBF_ABG[0x20] {};
     u16* VRAMCBF_AOBJ[0x10] {};
