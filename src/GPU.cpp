@@ -126,6 +126,9 @@ void GPU::ResetVRAMCache() noexcept
 
 void GPU::Reset() noexcept
 {
+    CaptureCnt = 0;
+    CaptureEnable = false;
+
     ScreensEnabled = false;
     ScreenSwap = false;
 

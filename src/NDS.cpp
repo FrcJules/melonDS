@@ -473,7 +473,8 @@ void NDS::Reset()
     memset(SharedWRAM, 0, 0x8000);
     memset(ARM7WRAM, 0, 0x10000);
 
-    MapSharedWRAM(0);
+    // forced: with WRAMCnt already 0 (new object) the mapping was never set up
+    MapSharedWRAM(0, true);
 
     // TODO FIX THOSE VALUES
     // TODO figure out what they should be
@@ -509,6 +510,14 @@ void NDS::Reset()
 
     DivCnt = 0;
     SqrtCnt = 0;
+    // also the operands and results (0 after a reset on hardware): they used to keep leftover memory, which the
+    // first division/square root of a game read when it wrote one operand before the other
+    memset(DivNumerator, 0, sizeof(DivNumerator));
+    memset(DivDenominator, 0, sizeof(DivDenominator));
+    memset(DivQuotient, 0, sizeof(DivQuotient));
+    memset(DivRemainder, 0, sizeof(DivRemainder));
+    memset(SqrtVal, 0, sizeof(SqrtVal));
+    SqrtRes = 0;
 
     ARM9.Reset();
     ARM7.Reset();
@@ -728,8 +737,8 @@ bool NDS::DoSavestate(Savestate* file)
     if (!file->Saving)
     {
         // 'dept of redundancy dept'
-        // but we do need to update the mappings
-        MapSharedWRAM(WRAMCnt);
+        // but we do need to update the mappings (forced: WRAMCnt already holds the loaded value)
+        MapSharedWRAM(WRAMCnt, true);
 
         InitTimings();
         SetGBASlotTimings();
@@ -1290,9 +1299,9 @@ void NDS::SetExMemCnt(u32 cpu, u16 val, u16 mask)
 }
 
 
-void NDS::MapSharedWRAM(u8 val)
+void NDS::MapSharedWRAM(u8 val, bool force)
 {
-    if (val == WRAMCnt)
+    if (val == WRAMCnt && !force)
         return;
 
     JIT.Memory.RemapSWRAM();
